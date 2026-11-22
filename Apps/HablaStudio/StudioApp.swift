@@ -8,9 +8,8 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let d = UserDefaults.standard
-        if !d.bool(forKey: "habla.loginItemSet") {
-            d.set(true, forKey: "habla.loginItemSet")
+        // On by default; re-registered each launch so it follows the app if it moves or is renamed.
+        if UserDefaults.standard.object(forKey: "habla.openAtLogin") as? Bool ?? true {
             try? SMAppService.mainApp.register()
         }
         // Start serving and narrating even if no window gets opened (login launch, window closed).
@@ -21,7 +20,7 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Habla Studio for Mac: import EPUBs, narrate them with Kokoro, share with your iPhone.
+/// Habla for Mac: import EPUBs, narrate them with Kokoro, share with your iPhone.
 @main
 struct StudioApp: App {
     @NSApplicationDelegateAdaptor(StudioAppDelegate.self) private var delegate
@@ -34,7 +33,7 @@ struct StudioApp: App {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        Window("Habla Studio", id: "main") {
+        Window("Habla", id: "main") {
             StudioWindowView(store: store, updater: updater,
                              installScript: Bundle.main.url(forResource: "install", withExtension: "sh"),
                              openReader: { openWindow(value: $0) })
@@ -57,6 +56,7 @@ struct StudioApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { Task { await updater.check(userInitiated: true) } }
                 Toggle("Open at Login", isOn: Binding(get: { openAtLogin }, set: { on in
+                    UserDefaults.standard.set(on, forKey: "habla.openAtLogin")
                     if on { try? SMAppService.mainApp.register() } else { try? SMAppService.mainApp.unregister() }
                     openAtLogin = SMAppService.mainApp.status == .enabled
                 }))

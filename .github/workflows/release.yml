@@ -1,5 +1,5 @@
 # Every push to main builds both apps and publishes a release "build-N".
-#  - Habla Studio (Mac) finds it, downloads it, and installs it when you restart or quit.
+#  - Habla for Mac finds it, downloads it, and installs it when you restart or quit.
 #  - Habla (iPhone) shows "Update in AltStore"; AltStore installs it from altstore.json.
 name: Release
 on:
@@ -48,7 +48,7 @@ jobs:
         run: |
           MSG=$(git log -1 --pretty=%s)
           gh release create "build-$BUILD_NUMBER" \
-            dist/Habla-Studio.zip dist/Habla.ipa dist/altstore.json \
+            dist/Habla-Mac.zip dist/Habla.ipa dist/altstore.json \
             --title "Habla 1.$BUILD_NUMBER" \
             --notes "$MSG" \
             --target "$GITHUB_SHA" --latest

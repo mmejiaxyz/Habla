@@ -1,13 +1,17 @@
 import Foundation
 import Network
 
-public enum SyncError: Error, CustomStringConvertible {
-    case http(Int, String), unreachable(String), integrity(String)
+public enum SyncError: Error, CustomStringConvertible, Equatable {
+    case http(Int, String), unreachable(String), integrity(String), pairing(String)
+    /// The Mac doesn't know this device (never paired, or forgotten on the Mac).
+    case notPaired
     public var description: String {
         switch self {
         case .http(let code, let path): return "Server returned \(code) for \(path)"
         case .unreachable(let s): return "Can't reach the Mac: \(s)"
         case .integrity(let p): return "Downloaded file failed its checksum: \(p)"
+        case .pairing(let m): return m
+        case .notPaired: return "This iPhone isn't paired with that Mac."
         }
     }
 }
@@ -135,6 +139,23 @@ public struct SyncClient: Sendable {
         for remote in try await getJSON([ReadingPosition].self, "v1/progress") { store.merge(remote) }
     }
 
+    // MARK: Pairing
+
+    /// The Mac's public hello: name and library id (no pairing needed).
+    public func hello() async throws -> ServerHello {
+        try await getJSON(ServerHello.self, "v1")
+    }
+
+    /// Pairs with the code shown on the Mac. `fingerprint`: the certificate this session saw
+    /// (from the QR code, or recorded by `PinnedTrust` on first contact).
+    public func pair(code: String, fingerprint: String, deviceID: String, deviceName: String) async throws -> PairResponse {
+        let body = PairRequest(deviceID: deviceID, deviceName: deviceName,
+                               proof: Pairing.proof(code: code, fingerprint: fingerprint, deviceID: deviceID))
+        do { return try await sendJSON(PairResponse.self, "v1/pair", method: "POST", body: body) }
+        catch SyncError.http(403, _) { throw SyncError.pairing("That code didn't work. Check it on your Mac (codes last 10 minutes).") }
+        catch SyncError.http(404, _) { throw SyncError.pairing("This Mac doesn't support pairing. Update Habla on your Mac.") }
+    }
+
     /// Sends an EPUB to the Mac, which imports and narrates it. Returns the book id.
     @discardableResult
     public func sendBook(_ epub: URL, filename: String? = nil) async throws -> String {
@@ -201,6 +222,7 @@ public struct SyncClient: Sendable {
 
     func check(_ response: URLResponse, _ path: String) throws {
         guard let http = response as? HTTPURLResponse else { return }
+        if http.statusCode == 401 { throw SyncError.notPaired }
         guard (200..<300).contains(http.statusCode) else { throw SyncError.http(http.statusCode, path) }
     }
 }
@@ -213,6 +235,9 @@ public final class ServiceBrowser: @unchecked Sendable {
     public struct Service: Hashable, Sendable {
         public var name: String
         public var url: URL
+        /// The library id from Bonjour TXT (`id`); nil for old servers / `habla serve`.
+        public var libraryID: String?
+        public init(name: String, url: URL, libraryID: String? = nil) { self.name = name; self.url = url; self.libraryID = libraryID }
     }
 
     private var browser: NWBrowser?
@@ -220,19 +245,27 @@ public final class ServiceBrowser: @unchecked Sendable {
     private var resolving: [String: NWConnection] = [:]
     public var onChange: (@Sendable ([Service]) -> Void)?
     private var services: [String: Service] = [:]
+    private var txt: [String: (id: String?, tls: Bool)] = [:]
 
     public init() {}
 
     public func start() {
         let params = NWParameters.tcp
-        let b = NWBrowser(for: .bonjour(type: SyncProtocol.bonjourType, domain: "local."), using: params)
+        let b = NWBrowser(for: .bonjourWithTXTRecord(type: SyncProtocol.bonjourType, domain: "local."), using: params)
         b.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self else { return }
-            let names = Set(results.compactMap { r -> String? in
-                if case let .service(name, _, _, _) = r.endpoint { return name }
-                return nil
-            })
+            var names = Set<String>()
+            for r in results {
+                guard case let .service(name, _, _, _) = r.endpoint else { continue }
+                names.insert(name)
+                if case let .bonjour(record) = r.metadata {
+                    let info = (id: record["id"], tls: record["tls"] == "1")
+                    if let old = self.txt[name], old.id != info.id || old.tls != info.tls { self.services[name] = nil }
+                    self.txt[name] = info
+                }
+            }
             self.services = self.services.filter { names.contains($0.key) }
+            self.txt = self.txt.filter { names.contains($0.key) }
             for r in results { self.resolve(r.endpoint) }
             self.onChange?(Array(self.services.values))
         }
@@ -259,8 +292,9 @@ public final class ServiceBrowser: @unchecked Sendable {
                 if case let .hostPort(host, port)? = conn.currentPath?.remoteEndpoint {
                     var h = "\(host)"
                     if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }
-                    if let url = URL(string: "http://\(h):\(port.rawValue)") {
-                        self.services[name] = Service(name: name, url: url)
+                    let info = self.txt[name]
+                    if let url = URL(string: "\(info?.tls == true ? "https" : "http")://\(h):\(port.rawValue)") {
+                        self.services[name] = Service(name: name, url: url, libraryID: info?.id)
                         self.onChange?(Array(self.services.values))
                     }
                 }

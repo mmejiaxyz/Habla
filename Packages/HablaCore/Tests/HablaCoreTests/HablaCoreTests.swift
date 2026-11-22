@@ -190,7 +190,7 @@ final class SyncTests: XCTestCase {
 
         // Wrong token is refused.
         do { _ = try await SyncClient(baseURL: base, accessToken: "nope").library(); XCTFail("expected 401") }
-        catch SyncError.http(let code, _) { XCTAssertEqual(code, 401) }
+        catch { XCTAssertEqual(error as? SyncError, .notPaired) }
 
         let client = SyncClient(baseURL: base, accessToken: "secret")
         let lib = try await client.library()
@@ -509,6 +509,82 @@ final class XteinkTests: XCTestCase {
         r.httpMethod = "PUT"; r.httpBody = Data("junk".utf8); r.setValue("00", forHTTPHeaderField: "X-Habla-SHA256")
         let (_, resp) = try await URLSession.shared.data(for: r)
         XCTAssertEqual((resp as? HTTPURLResponse)?.statusCode, 422)
+    }
+
+    /// Pairing over TLS: nothing without pairing, codes are single-use and bound to the
+    /// certificate, pins and forgotten devices are enforced.
+    func testPairingKeepsOtherDevicesOut() async throws {
+        guard #available(macOS 15.0, *) else { throw XCTSkip("needs macOS 15") }
+        let root = Fixtures.tempDir()
+        let mac = root.appendingPathComponent("Library")
+        _ = try BookImporter().importEPUB(at: Fixtures.writeSampleEPUB(to: root), into: mac)
+        let server = LibraryServer(library: mac, progress: ProgressStore(fileURL: root.appendingPathComponent("p.json")), serviceName: "Habla on Test Mac")
+        let tls = try TLSIdentity.loadOrCreate(in: root.appendingPathComponent("Security"))
+        server.tlsIdentity = tls.identity; server.tlsFingerprint = tls.fingerprint
+        let registry = DeviceRegistry(fileURL: root.appendingPathComponent("devices.json"))
+        let window = PairingWindow()
+        server.registry = registry; server.pairing = window; server.libraryID = "lib1"; server.allowEReaders = false
+        let port = try await server.start(port: 0, advertise: false)
+        defer { server.stop() }
+        let url = URL(string: "https://127.0.0.1:\(port)")!
+
+        // A second load reuses the same certificate (the iPhone's pin stays valid).
+        XCTAssertEqual(try TLSIdentity.loadOrCreate(in: root.appendingPathComponent("Security")).fingerprint, tls.fingerprint)
+
+        // Stranger: sees only the hello.
+        let trust = PinnedTrust(fingerprint: nil)
+        let stranger = SyncClient(baseURL: url, session: trust.session())
+        let hello = try await stranger.hello()
+        XCTAssertEqual(hello.libraryID, "lib1"); XCTAssertEqual(hello.pairing, true)
+        XCTAssertEqual(trust.seen, tls.fingerprint)
+        do { _ = try await stranger.library(); XCTFail("library must need pairing") } catch { XCTAssertEqual(error as? SyncError, .notPaired) }
+        let bogus = SyncClient(baseURL: url, accessToken: "guess", session: trust.session())
+        do { _ = try await bogus.library(); XCTFail("guessed token accepted") } catch { XCTAssertEqual(error as? SyncError, .notPaired) }
+        // No e-reader routes while the Xteink feature is off.
+        let (_, opds) = try await trust.session().data(from: url.appendingPathComponent("opds"))
+        XCTAssertEqual((opds as? HTTPURLResponse)?.statusCode, 401)
+
+        // No code open → pairing fails.
+        do { _ = try await stranger.pair(code: "AAAAA-AAAAA", fingerprint: tls.fingerprint, deviceID: "x", deviceName: "x"); XCTFail("paired without a code") } catch {}
+
+        let code = window.open()
+        // A relay presents its own certificate: a proof made with that fingerprint is refused.
+        do { _ = try await stranger.pair(code: code, fingerprint: String(repeating: "a", count: 64), deviceID: "p1", deviceName: "Phone"); XCTFail("relayed proof accepted") } catch {}
+        // The right code, typed sloppily, works once.
+        let typed = code.lowercased().replacingOccurrences(of: "-", with: " ")
+        let paired = try await stranger.pair(code: typed, fingerprint: tls.fingerprint, deviceID: "p1", deviceName: "Phone")
+        XCTAssertEqual(paired.libraryID, "lib1")
+        do { _ = try await stranger.pair(code: code, fingerprint: tls.fingerprint, deviceID: "p2", deviceName: "Other"); XCTFail("code reused") } catch {}
+
+        // Paired + pinned: full access.
+        let phone = SyncClient(baseURL: url, accessToken: paired.token, session: PinnedTrust(fingerprint: tls.fingerprint).session())
+        let books = try await phone.library()
+        XCTAssertEqual(books.count, 1)
+        XCTAssertEqual(registry.all.map(\.name), ["Phone"])
+        // Same token, wrong pin (another machine answering at that address): the phone refuses it.
+        let wrongPin = SyncClient(baseURL: url, accessToken: paired.token, session: PinnedTrust(fingerprint: String(repeating: "b", count: 64)).session())
+        do { _ = try await wrongPin.library(); XCTFail("wrong certificate accepted") } catch {}
+
+        // Five wrong guesses close the window.
+        let code2 = window.open()
+        for _ in 0..<5 { _ = try? await stranger.pair(code: "ZZZZZ-ZZZZZ", fingerprint: tls.fingerprint, deviceID: "p3", deviceName: "x") }
+        do { _ = try await stranger.pair(code: code2, fingerprint: tls.fingerprint, deviceID: "p3", deviceName: "x"); XCTFail("window should be closed") } catch {}
+
+        // Forgotten on the Mac → locked out.
+        registry.forget("p1")
+        do { _ = try await phone.library(); XCTFail("forgotten device still in") } catch { XCTAssertEqual(error as? SyncError, .notPaired) }
+        // Tokens are stored only as hashes.
+        let disk = try String(contentsOf: root.appendingPathComponent("devices.json"), encoding: .utf8)
+        XCTAssertFalse(disk.contains(paired.token))
+    }
+
+    func testPairingInviteRoundTrip() {
+        let inv = PairingInvite(libraryID: "abc", name: "Habla on Mac", address: "192.168.1.2:8787",
+                                fingerprint: String(repeating: "c", count: 64), code: "ABCDE-FGH12")
+        XCTAssertEqual(PairingInvite(url: inv.url), inv)
+        XCTAssertNil(PairingInvite(url: URL(string: "habla://pair?id=x")!))
+        XCTAssertEqual(Pairing.normalize("abcde fgh-iO"), "ABCDEFGH10")
+        XCTAssertEqual(Pairing.newCode().count, 11)
     }
 }
 

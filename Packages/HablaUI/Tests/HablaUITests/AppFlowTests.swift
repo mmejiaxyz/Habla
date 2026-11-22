@@ -26,16 +26,31 @@ final class AppFlowTests: XCTestCase {
     }
 
     func testPhoneSyncsBooksPositionsAndNewChapters() async throws {
+        guard #available(macOS 15.0, *) else { throw XCTSkip("needs macOS 15") }
         let (lib, b, pipeline) = try await macLibrary()
         let id = try b.manifest().id
-        let server = LibraryServer(library: lib, progress: ProgressStore(fileURL: lib.appendingPathComponent("p.json")))
+        // Secured like Habla Studio: TLS + pairing.
+        let server = LibraryServer(library: lib, progress: ProgressStore(fileURL: lib.appendingPathComponent("p.json")), serviceName: "Habla on Test Mac")
+        let tls = try TLSIdentity.loadOrCreate(in: temp())
+        server.tlsIdentity = tls.identity; server.tlsFingerprint = tls.fingerprint
+        server.registry = DeviceRegistry(fileURL: temp().appendingPathComponent("devices.json"))
+        let window = PairingWindow()
+        server.pairing = window; server.libraryID = "lib-\(UUID().uuidString.prefix(6))"
         let port = try await server.start(port: 0, advertise: false)
         defer { server.stop() }
 
         let phone = PhoneStore(root: temp())
-        phone.manualAddress = "127.0.0.1:\(port)"
-        await phone.connectManually()
-        XCTAssertTrue(phone.isConnected)
+        defer { phone.unpair() }
+        // A typed address is found but not trusted until paired.
+        let found = await phone.lookUp(address: "127.0.0.1:\(port)")
+        XCTAssertEqual(found?.libraryID, server.libraryID)
+        await phone.sync()
+        XCTAssertFalse(phone.isConnected)
+        await phone.pair(at: try XCTUnwrap(found).url, code: "WRONG-CODE0")
+        XCTAssertNil(phone.paired)
+        await phone.pair(at: try XCTUnwrap(found).url, code: window.open())
+        XCTAssertEqual(phone.paired?.fingerprint, tls.fingerprint)
+        XCTAssertTrue(phone.isConnected, phone.error ?? "")
         guard case .remote = phone.books.first(where: { $0.id == id })?.availability else { return XCTFail("book should be on the Mac") }
 
         // Download.

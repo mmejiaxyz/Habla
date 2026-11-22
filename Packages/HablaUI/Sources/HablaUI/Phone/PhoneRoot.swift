@@ -68,7 +68,11 @@ public struct PhoneRoot: View {
             store.start()
         }
         // EPUBs opened with Habla from Files, Mail, Safari or the share sheet.
-        .onOpenURL { url in if url.isFileURL { store.importBooks([url]) } }
+        .onOpenURL { url in
+            if url.isFileURL { store.importBooks([url]) }
+            // The QR code in Habla Studio, scanned with the Camera.
+            else if let invite = PairingInvite(url: url) { path = [.mac]; Task { await store.pair(invite: invite) } }
+        }
         .onChange(of: phase) { _, p in
             switch p {
             case .active: store.start()                 // restart discovery after sleep / network change

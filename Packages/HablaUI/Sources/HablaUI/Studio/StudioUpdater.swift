@@ -3,7 +3,7 @@ import AppKit
 import Foundation
 import HablaCore
 
-/// Keeps Habla Studio up to date from GitHub releases: checks on launch and every few hours,
+/// Keeps Habla for Mac up to date from GitHub releases: checks on launch and every few hours,
 /// downloads the new build in the background, and swaps it in when you restart (or quit).
 @MainActor
 public final class StudioUpdater: ObservableObject {
@@ -18,7 +18,7 @@ public final class StudioUpdater: ObservableObject {
     @Published public private(set) var state: State = .idle
     public let installedBuild: Int
     private let folder: URL
-    private var staged: URL?            // the unpacked new "Habla Studio.app"
+    private var staged: URL?            // the unpacked new Habla.app
     private var timer: Task<Void, Never>?
     private var installing = false
     private var terminateObserver: NSObjectProtocol?
@@ -60,10 +60,10 @@ public final class StudioUpdater: ObservableObject {
         }
         state = .checking
         guard let update = await AppUpdate.available(installed: installedBuild) else {
-            state = userInitiated ? .failed("Habla Studio is up to date (build \(installedBuild)).") : .idle
+            state = userInitiated ? .failed("Habla is up to date (build \(installedBuild)).") : .idle
             return
         }
-        guard let zip = update.assets["Habla-Studio.zip"] else { state = .idle; return }
+        guard let zip = update.assets["Habla-Mac.zip"] ?? update.assets["Habla-Studio.zip"] else { state = .idle; return }
         state = .downloading(build: update.build)
         do {
             staged = try await download(zip, build: update.build)
@@ -86,7 +86,9 @@ public final class StudioUpdater: ObservableObject {
         let out = folder.appendingPathComponent("build-\(build)", isDirectory: true)
         try run("/usr/bin/ditto", ["-x", "-k", zip.path, out.path])
         try? fm.removeItem(at: zip)
-        let app = out.appendingPathComponent("Habla Studio.app")
+        // The one app inside the archive (named "Habla.app" since the rename).
+        guard let app = (try? fm.contentsOfDirectory(at: out, includingPropertiesForKeys: nil))?
+            .first(where: { $0.pathExtension == "app" }) else { throw UpdateError("The download was incomplete.") }
         // Only accept a complete Habla Studio of exactly the advertised build.
         guard let info = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist")),
               info["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier,
@@ -117,20 +119,23 @@ public final class StudioUpdater: ObservableObject {
               FileManager.default.fileExists(atPath: staged.path) else { return false }
         installing = true
         let script = """
-        PID="$1"; OLD="$2"; NEW="$3"; RELAUNCH="$4"
+        PID="$1"; OLD="$2"; NEW="$3"; RELAUNCH="$4"; TARGET="$5"
         while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
         BAK="$OLD.previous"
         rm -rf "$BAK"
+        [ "$TARGET" != "$OLD" ] && [ -e "$TARGET" ] && TARGET="$OLD"   # never overwrite another app
         if mv "$OLD" "$BAK"; then
-          if mv "$NEW" "$OLD"; then rm -rf "$BAK"; else mv "$BAK" "$OLD"; fi
+          if mv "$NEW" "$TARGET"; then rm -rf "$BAK"; else mv "$BAK" "$OLD"; TARGET="$OLD"; fi
         fi
-        [ "$RELAUNCH" = 1 ] && open "$OLD"
+        [ "$RELAUNCH" = 1 ] && open "$TARGET"
         exit 0
         """
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", script, "habla-update", String(ProcessInfo.processInfo.processIdentifier),
-                       Bundle.main.bundlePath, staged.path, relaunch ? "1" : "0"]
+                       Bundle.main.bundlePath, staged.path, relaunch ? "1" : "0",
+                       // Takes the new name if the app was renamed (Habla Studio.app → Habla.app).
+                       ((Bundle.main.bundlePath as NSString).deletingLastPathComponent as NSString).appendingPathComponent(staged.lastPathComponent)]
         do { try p.run() } catch { installing = false; return false }
         return true
     }

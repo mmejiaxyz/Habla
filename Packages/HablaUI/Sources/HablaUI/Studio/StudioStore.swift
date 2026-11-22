@@ -60,6 +60,19 @@ public final class StudioStore: ObservableObject {
         didSet { UserDefaults.standard.set(autoNarrate, forKey: "habla.autoNarrate") }
     }
     @Published public private(set) var phoneLastSeen: Date?
+    /// Devices paired with this Mac (only they can see the library or send books).
+    @Published public private(set) var devices: [PairedDevice] = []
+    /// The pairing code on screen right now (nil when not pairing).
+    @Published public private(set) var pairingCode: PairingCode?
+    /// False if the encryption certificate couldn't be made (pairing still required).
+    @Published public private(set) var encrypted = false
+
+    public struct PairingCode: Equatable {
+        public var code: String
+        public var expires: Date
+        public var invite: URL
+        public init(code: String, expires: Date, invite: URL) { self.code = code; self.expires = expires; self.invite = invite }
+    }
     @Published public private(set) var serverAddress: String?
     @Published public private(set) var onWiFi = true
     @Published public private(set) var xteink: XteinkState = .looking
@@ -97,16 +110,76 @@ public final class StudioStore: ObservableObject {
         progress = ProgressStore(fileURL: self.support.appendingPathComponent("progress.json"))
         server = LibraryServer(library: library, progress: progress,
                                serviceName: "Habla on \(Host.current().localizedName ?? "Mac")")
+        // Privacy: only paired devices get in; traffic is encrypted and pinned to this Mac.
+        registry = DeviceRegistry(fileURL: self.support.appendingPathComponent("devices.json"))
         server.koreaderKeyMD5 = xteinkCredentials().map { KOReaderDigest.filename($0.password) }
+        server.registry = registry
+        server.pairing = pairingWindow
+        server.libraryID = StudioStore.libraryID()
+        server.allowEReaders = Features.xteink
+        if #available(macOS 15.0, *),
+           let tls = try? TLSIdentity.loadOrCreate(in: self.support.appendingPathComponent("Security", isDirectory: true)) {
+            server.tlsIdentity = tls.identity
+            server.tlsFingerprint = tls.fingerprint
+            encrypted = true
+        }
+        devices = registry.all
         reload()
         checkKokoro()
     }
+
+    let registry: DeviceRegistry
+    let pairingWindow = PairingWindow()
+    private var pairingTimer: Task<Void, Never>?
+
+    /// Random, stable id for this Mac's library (tells iPhones which Mac is theirs).
+    static func libraryID() -> String {
+        if let id = UserDefaults.standard.string(forKey: "habla.libraryID") { return id }
+        var bytes = [UInt8](repeating: 0, count: 8)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let id = bytes.map { String(format: "%02x", $0) }.joined()
+        UserDefaults.standard.set(id, forKey: "habla.libraryID")
+        return id
+    }
+
+    // MARK: Pairing
+
+    /// Shows a fresh code + QR for 10 minutes.
+    public func startPairing() {
+        let code = pairingWindow.open()
+        refreshPairing()
+        _ = code
+        pairingTimer?.cancel()
+        pairingTimer = Task { [weak self] in
+            // Expire the sheet's code on time.
+            try? await Task.sleep(nanoseconds: 600 * 1_000_000_000)
+            self?.refreshPairing()
+        }
+    }
+
+    public func stopPairing() { pairingWindow.close(); refreshPairing() }
+
+    public func forget(_ device: PairedDevice) {
+        registry.forget(device.id)
+        devices = registry.all
+    }
+
+    private func refreshPairing() {
+        devices = registry.all
+        guard let c = pairingWindow.current else { pairingCode = nil; return }
+        let invite = PairingInvite(libraryID: server.libraryID ?? "", name: server.serviceName, address: serverAddress,
+                                   fingerprint: server.tlsFingerprint ?? String(repeating: "0", count: 64), code: c.code)
+        pairingCode = PairingCode(code: c.code, expires: c.expires, invite: invite.url)
+    }
+
+    public var serverName: String { server.serviceName }
 
     public var kokoroDirectory: URL { support.appendingPathComponent("kokoro", isDirectory: true) }
 
     // MARK: Lifecycle
 
     private var started = false
+    private var devicesRefreshed = Date.distantPast
 
     public func start() {
         guard !started else { return }   // window reopened: keep the one server / watcher
@@ -116,15 +189,19 @@ public final class StudioStore: ObservableObject {
             Task { @MainActor in self?.importFiles([file], fromPhone: true) }
         }
         importInboxLeftovers()
-        server.onEvent = { [weak self] event in
-            guard event.hasPrefix("GET /v1/library") || event.hasPrefix("PUT /v1/progress") else { return }
-            Task { @MainActor in self?.phoneLastSeen = Date() }
+        server.onDevice = { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.phoneLastSeen = Date()
+                if Date().timeIntervalSince(self.devicesRefreshed) > 30 { self.devicesRefreshed = Date(); self.devices = self.registry.all }
+            }
         }
+        pairingWindow.onChange = { [weak self] in Task { @MainActor in self?.refreshPairing() } }
         Task {
             do {
                 let port = try await server.start()
                 if port != SyncProtocol.defaultPort {
-                    alert = "Another copy of Habla Studio (or `habla serve`) is already sharing on this Mac. This window shares on port \(port) instead — quit the other copy to avoid confusion."
+                    alert = "Another copy of Habla (or `habla serve`) is already sharing on this Mac. This window shares on port \(port) instead — quit the other copy to avoid confusion."
                 }
                 refreshAddress()
             } catch {

@@ -8,7 +8,7 @@ version = f"1.{build}"
 url = f"https://github.com/{REPO}/releases/download/build-{build}/Habla.ipa"
 date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 size = os.path.getsize(ipa)
-desc = "Listen to and read the books Habla Studio narrates on your Mac."
+desc = "Listen to and read the books Habla narrates on your Mac."
 source = {
     "name": "Habla",
     "identifier": "com.habla.source",
@@ -31,7 +31,7 @@ source = {
         "version": version, "versionDate": date, "versionDescription": f"Build {build}", "downloadURL": url, "size": size,
         "appPermissions": {
             "entitlements": [],
-            "privacy": {"NSLocalNetworkUsageDescription": "Habla finds Habla Studio on your Mac to download books and sync your place."},
+            "privacy": {"NSLocalNetworkUsageDescription": "Habla finds Habla on your Mac to download books and sync your place."},
         },
     }],
     "news": [],

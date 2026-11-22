@@ -1,6 +1,7 @@
 #if os(macOS)
 import SwiftUI
 import UniformTypeIdentifiers
+import CoreImage
 import HablaCore
 
 /// Habla Studio's main window.
@@ -12,6 +13,7 @@ public struct StudioWindowView: View {
     @State private var dropping = false
     @State private var showImporter = false
     @State private var confirmDelete: BookManifest?
+    @State private var confirmForget: PairedDevice?
 
     public init(store: StudioStore, updater: StudioUpdater = StudioUpdater(), installScript: URL?, openReader: @escaping (String) -> Void) {
         self.store = store; self.updater = updater; self.installScript = installScript; self.openReader = openReader
@@ -44,7 +46,7 @@ public struct StudioWindowView: View {
                       allowsMultipleSelection: true) { r in
             if case .success(let urls) = r { store.importFiles(urls) }
         }
-        .alert("Habla Studio", isPresented: Binding(get: { store.alert != nil }, set: { if !$0 { store.alert = nil } })) {
+        .alert("Habla", isPresented: Binding(get: { store.alert != nil }, set: { if !$0 { store.alert = nil } })) {
             Button("OK") { store.alert = nil }
         } message: { Text(store.alert ?? "") }
         .confirmationDialog("Delete “\(confirmDelete?.title ?? "")”?", isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } })) {
@@ -138,14 +140,32 @@ public struct StudioWindowView: View {
 
     var devices: some View {
         VStack(alignment: .leading, spacing: 0) {
-            deviceRow(on: store.phoneLastSeen.map { Date().timeIntervalSince($0) < 600 } ?? false, name: "iPhone",
-                      detail: store.phoneLastSeen.map { "Synced \(Format.ago($0))" }
-                        ?? (!store.onWiFi ? "This Mac isn't on Wi-Fi" : store.serverAddress.map { "Open Habla on your iPhone (same Wi-Fi) · \($0)" } ?? "Starting…"))
+            if store.devices.isEmpty {
+                deviceRow(on: false, name: "No iPhone yet",
+                          detail: !store.onWiFi ? "This Mac isn't on Wi-Fi" : "Pair your iPhone to share books and your place.")
+            }
+            ForEach(store.devices) { d in
+                let recent = d.lastSeen.map { Date().timeIntervalSince($0) < 600 } ?? false
+                deviceRow(on: recent, name: d.name, detail: d.lastSeen.map { "Synced \(Format.ago($0))" } ?? "Paired")
+                    .contextMenu { Button("Forget “\(d.name)”…", role: .destructive) { confirmForget = d } }
+            }
+            Button { store.startPairing() } label: {
+                Text(store.devices.isEmpty ? "Pair iPhone…" : "Pair another device…")
+                    .font(Theme.grotesk(13)).foregroundStyle(Theme.accentText)
+                    .padding(.horizontal, 24).padding(.vertical, 8)
+                    .contentShape(Rectangle())
+            }.buttonStyle(.plain)
             if Features.xteink {
                 Hairline().padding(.horizontal, 24)
                 xteinkRow
             }
         }
+        .sheet(isPresented: Binding(get: { store.pairingCode != nil }, set: { if !$0 { store.stopPairing() } })) {
+            if let p = store.pairingCode { PairingSheet(pairing: p, macName: store.serverName, encrypted: store.encrypted) { store.stopPairing() } }
+        }
+        .confirmationDialog("Forget “\(confirmForget?.name ?? "")”?", isPresented: Binding(get: { confirmForget != nil }, set: { if !$0 { confirmForget = nil } })) {
+            Button("Forget", role: .destructive) { if let d = confirmForget { store.forget(d) }; confirmForget = nil }
+        } message: { Text("It won't be able to sync with this Mac until you pair it again. Its downloaded books stay on it.") }
     }
 
     var xteinkRow: some View {
@@ -186,9 +206,9 @@ public struct StudioWindowView: View {
         case .ready(let build):
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("A new version of Habla Studio is ready").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
+                    Text("A new version of Habla is ready").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                     Text(updater.canInstall ? "Build \(build). Restart now, or it installs the next time you quit."
-                                            : "Build \(build). Move Habla Studio to your Applications folder to update it automatically.")
+                                            : "Build \(build). Move Habla to your Applications folder to update it automatically.")
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.65))
                 }
                 Spacer()
@@ -228,7 +248,7 @@ public struct StudioWindowView: View {
                     Text("Checking the voice engine…").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                 default:
                     Text("Install the voice engine to narrate books").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
-                    Text("Kokoro runs on this Mac, free and offline. One download of about 350 MB.")
+                    Text("Kokoro runs on this Mac, free and offline. One download of about 570 MB — nothing else to install.")
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.65))
                 }
             }
@@ -439,6 +459,79 @@ public struct StudioReaderWindow: View {
     static func saveStyle(_ s: ReaderStyle) {
         UserDefaults.standard.set(s.theme.rawValue, forKey: "habla.mac.theme")
         UserDefaults.standard.set(Double(s.fontSize), forKey: "habla.mac.size")
+    }
+}
+
+/// "Pair your iPhone": a QR code for the iPhone camera, and the same code to type.
+public struct PairingSheet: View {
+    let pairing: StudioStore.PairingCode
+    let macName: String
+    let encrypted: Bool
+    let done: () -> Void
+
+    public init(pairing: StudioStore.PairingCode, macName: String, encrypted: Bool, done: @escaping () -> Void) {
+        self.pairing = pairing; self.macName = macName; self.encrypted = encrypted; self.done = done
+    }
+
+    public var body: some View {
+        HStack(alignment: .top, spacing: 36) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Pair your iPhone").font(Theme.display(34)).foregroundStyle(Theme.text)
+                VStack(alignment: .leading, spacing: 8) {
+                    step(1, "On the iPhone, open the Camera and point it at this code. Tap the Habla link.")
+                    step(2, "Or open Habla → MAC, choose “\(macName)” and type:")
+                }
+                Text(pairing.code).font(.system(size: 30, weight: .semibold, design: .monospaced)).tracking(2)
+                    .foregroundStyle(Theme.text).textSelection(.enabled).padding(.leading, 26)
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    let left = max(0, Int(pairing.expires.timeIntervalSince(ctx.date)))
+                    Text(left > 0 ? "Works once, for \(left / 60):\(String(format: "%02d", left % 60))" : "This code expired")
+                        .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).monospacedDigit()
+                }.padding(.leading, 26)
+                Text(encrypted ? "Only paired devices can see your books. Everything between them and this Mac is encrypted."
+                               : "Only paired devices can see your books.")
+                    .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 10)
+                Spacer(minLength: 0)
+                PillButton("Done", filled: false, action: done).frame(width: 140)
+            }
+            .frame(width: 330, alignment: .leading)
+            QRCode(text: pairing.invite.absoluteString)
+                .frame(width: 220, height: 220)
+                .padding(16)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.white))
+        }
+        .padding(36)
+        .frame(width: 680, height: 420)
+        .background(Theme.screen)
+    }
+
+    func step(_ n: Int, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text("\(n)").font(Theme.label(12)).foregroundStyle(Theme.accentText).frame(width: 16)
+            Text(text).font(Theme.grotesk(14)).foregroundStyle(Theme.text).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// A crisp QR code (Core Image, scaled without smoothing).
+struct QRCode: View {
+    let text: String
+    var body: some View {
+        if let image = Self.make(text) {
+            Image(decorative: image, scale: 1).interpolation(.none).resizable().aspectRatio(1, contentMode: .fit)
+                .accessibilityLabel("Pairing code")
+        } else {
+            Color.clear
+        }
+    }
+
+    static func make(_ text: String) -> CGImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(text.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let out = filter.outputImage else { return nil }
+        return CIContext().createCGImage(out, from: out.extent)
     }
 }
 #endif

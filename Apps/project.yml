@@ -34,7 +34,11 @@ targets:
             LSHandlerRank: Alternate
             LSItemContentTypes: [org.idpf.epub-container]
         LSSupportsOpeningDocumentsInPlace: false
-        NSLocalNetworkUsageDescription: Habla finds Habla Studio on your Mac to download books and sync your place.
+        # Pairing QR code in Habla on the Mac → habla://pair?... opens the app.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.habla.pair
+            CFBundleURLSchemes: [habla]
+        NSLocalNetworkUsageDescription: Habla finds Habla on your Mac to download books and sync your place.
         NSBonjourServices: [_habla._tcp]
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
@@ -59,17 +63,17 @@ targets:
     info:
       path: HablaStudio/Info.plist
       properties:
-        CFBundleDisplayName: Habla Studio
+        CFBundleDisplayName: Habla
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        CFBundleName: Habla Studio
+        CFBundleName: Habla
         LSApplicationCategoryType: public.app-category.books
         CFBundleDocumentTypes:
           - CFBundleTypeName: EPUB book
             CFBundleTypeRole: Viewer
             LSHandlerRank: Alternate
             LSItemContentTypes: [org.idpf.epub-container]
-        NSLocalNetworkUsageDescription: Habla Studio shares your books with your iPhone on your home network.
+        NSLocalNetworkUsageDescription: Habla shares your books with your iPhone on your home network.
         NSBonjourServices: [_habla._tcp]
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
@@ -77,7 +81,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.habla.studio
-        PRODUCT_NAME: Habla Studio
+        PRODUCT_NAME: Habla
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
         ENABLE_HARDENED_RUNTIME: NO

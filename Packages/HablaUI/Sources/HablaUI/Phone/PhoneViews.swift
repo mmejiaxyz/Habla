@@ -166,7 +166,7 @@ public struct PhoneLibraryView: View {
     var emptyState: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Your shelf is empty").font(Theme.display(30)).foregroundStyle(Theme.text)
-            Text("Add a DRM-free EPUB here or in Habla Studio on your Mac. You can read it right away; your Mac narrates it and the audio arrives over Wi-Fi.")
+            Text("Add a DRM-free EPUB here or in Habla on your Mac. You can read it right away; your Mac narrates it and the audio arrives over Wi-Fi.")
                 .font(Theme.grotesk(15)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
             PillButton("Add a book") { picking = true }.frame(width: 200).padding(.top, 8)
         }
@@ -201,9 +201,10 @@ public struct PhoneLibraryView: View {
 extension PhoneStore {
     public var isConnected: Bool { if case .connected = connection { return lastSync != nil }; return false }
     public var connectionSummary: String {
+        guard let mac = paired else { return "Not paired · tap MAC to pair with your Mac" }
         switch connection {
         case .connected(let name, _): return lastSync == nil ? "Connecting to \(name)…" : "\(name) · synced \(Format.ago(lastSync))"
-        case .searching: return "Looking for your Mac…"
+        case .searching: return "Looking for \(mac.name.replacingOccurrences(of: "Habla on ", with: ""))…"
         case .unreachable: return "Mac not reachable · your books still work offline"
         }
     }
@@ -499,6 +500,10 @@ public struct PhoneMacView: View {
     var close: () -> Void
     @State private var address = ""
     @State private var storageLine = ""
+    @State private var chosen: ServiceBrowser.Service?
+    @State private var code = ""
+    @State private var confirmUnpair = false
+    @FocusState private var codeFocused: Bool
 
     public init(store: PhoneStore, close: @escaping () -> Void) { self.store = store; self.close = close }
 
@@ -508,41 +513,12 @@ public struct PhoneMacView: View {
                 TopBar("", leading: "‹", trailing: "", onLeading: close)
                 Scroll {
                     VStack(alignment: .leading, spacing: 0) {
-                        StaggeredCaps([.init("Habla Studio ——"), .init("on your Mac", indent: 60)], size: 24)
-                        HStack(spacing: 8) {
-                            Circle().fill(store.isConnected ? Theme.accent : Theme.textDim.opacity(0.5)).frame(width: 7, height: 7)
-                            Text(store.connectionSummary).font(Theme.grotesk(14)).foregroundStyle(Theme.textDim)
-                        }.padding(.top, 18)
-
-                        PillButton(store.syncing ? "Syncing…" : "Sync now") { Task { await store.sync() } }
-                            .disabled(store.syncing).padding(.top, Theme.section)
-
+                        StaggeredCaps([.init("Habla ——"), .init("on your Mac", indent: 60)], size: 24)
+                        if let mac = store.paired { pairedSection(mac) } else { pairingSection }
                         if let e = store.error {
-                            Text(e).font(Theme.grotesk(13)).foregroundStyle(Theme.accentText).padding(.top, 12)
+                            Text(e).font(Theme.grotesk(13)).foregroundStyle(Theme.accentText)
+                                .fixedSize(horizontal: false, vertical: true).padding(.top, 12)
                         }
-
-                        CapsLabel("How it works").padding(.top, Theme.section + 8)
-                        Text("Open Habla Studio on your Mac and keep both on the same Wi-Fi. New books, newly narrated chapters and your place sync by themselves when the app opens. Everything stays on your home network.")
-                            .font(Theme.grotesk(15)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true).padding(.top, 10)
-
-                        CapsLabel("Can't find your Mac?").padding(.top, Theme.section)
-                        Text("Type the address shown in Habla Studio (for example 192.168.1.20:8787).")
-                            .font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).padding(.top, 10)
-                        HStack(spacing: 10) {
-                            TextField("192.168.1.20:8787", text: $address)
-                                .textFieldStyle(.plain).font(Theme.grotesk(16))
-                                .autocorrectionDisabled()
-                                #if os(iOS)
-                                .keyboardType(.URL).textInputAutocapitalization(.never)
-                                #endif
-                                .padding(.horizontal, 16).frame(height: 48)
-                                .background(Capsule().fill(Theme.surface))
-                            Button("Connect") { store.manualAddress = address; Task { await store.connectManually() } }
-                                .font(Theme.label(15)).foregroundStyle(Theme.ink)
-                                .padding(.horizontal, 18).frame(height: 48).background(Capsule().fill(Theme.accent))
-                                .buttonStyle(.plain).disabled(address.trimmingCharacters(in: .whitespaces).isEmpty)
-                        }.padding(.top, 12)
-
                         CapsLabel("On this iPhone").padding(.top, Theme.section)
                         Text(storageLine).font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).padding(.top, 10)
                     }
@@ -550,7 +526,104 @@ public struct PhoneMacView: View {
                 }
             }
         }
-        .onAppear { address = store.manualAddress; storageLine = computeStorage() }
+        .onAppear { storageLine = computeStorage() }
+        .confirmationDialog("Unpair “\(store.paired?.name ?? "")”?", isPresented: $confirmUnpair, titleVisibility: .visible) {
+            Button("Unpair", role: .destructive) { store.unpair() }
+        } message: { Text("Downloaded books stay on this iPhone. To sync again, pair from the Mac.") }
+    }
+
+    func pairedSection(_ mac: PhoneStore.PairedMac) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(mac.name).font(Theme.display(28)).foregroundStyle(Theme.text).padding(.top, 22)
+            HStack(spacing: 8) {
+                Circle().fill(store.isConnected ? Theme.accent : Theme.textDim.opacity(0.5)).frame(width: 7, height: 7)
+                Text(store.connectionSummary).font(Theme.grotesk(14)).foregroundStyle(Theme.textDim)
+            }.padding(.top, 10)
+            if !mac.fingerprint.isEmpty {
+                Label("Paired · encrypted", systemImage: "lock.fill").font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).padding(.top, 6)
+            }
+            PillButton(store.syncing ? "Syncing…" : "Sync now") { Task { await store.sync() } }
+                .disabled(store.syncing).padding(.top, Theme.section)
+            Button("Unpair this Mac") { confirmUnpair = true }
+                .buttonStyle(.plain).font(Theme.grotesk(14)).foregroundStyle(Theme.accentText).padding(.top, 18)
+            CapsLabel("How it works").padding(.top, Theme.section + 8)
+            Text("Keep Habla running on your Mac and both on the same Wi-Fi. New books, narrated chapters and your place sync whenever you open Habla. Other computers on the network can't see your books.")
+                .font(Theme.grotesk(15)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true).padding(.top, 10)
+        }
+    }
+
+    var pairingSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Pair with your Mac").font(Theme.display(28)).foregroundStyle(Theme.text).padding(.top, 22)
+            Text("In Habla on your Mac, choose Pair iPhone. Scan the code it shows with the Camera, or pick your Mac below and type the code.")
+                .font(Theme.grotesk(15)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true).padding(.top, 10)
+
+            CapsLabel("Macs on this Wi-Fi").padding(.top, Theme.section)
+            if store.nearby.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Looking…").font(Theme.grotesk(14)).foregroundStyle(Theme.textDim)
+                }.padding(.top, 12)
+            }
+            VStack(spacing: 0) {
+                ForEach(store.nearby, id: \.self) { svc in
+                    Button { withAnimation { chosen = svc; code = ""; codeFocused = true } } label: {
+                        RuledRow(svc.name.replacingOccurrences(of: "Habla on ", with: ""), highlighted: chosen == svc, accent: Theme.accentText) {
+                            Image(systemName: chosen == svc ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 18))
+                                .foregroundStyle(chosen == svc ? Theme.accentText : Theme.textDim.opacity(0.5))
+                        }
+                        .contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                }
+            }.padding(.top, 4)
+
+            if let svc = chosen {
+                CapsLabel("Code shown on \(svc.name.replacingOccurrences(of: "Habla on ", with: ""))").padding(.top, Theme.section)
+                HStack(spacing: 10) {
+                    TextField("XXXXX-XXXXX", text: $code)
+                        .focused($codeFocused)
+                        .textFieldStyle(.plain).font(.system(size: 20, weight: .medium, design: .monospaced))
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.characters)
+                        #endif
+                        .padding(.horizontal, 16).frame(height: 52)
+                        .background(Capsule().fill(Theme.surface))
+                        .onSubmit { pair(svc) }
+                    Button { pair(svc) } label: {
+                        Group { if store.pairingBusy { ProgressView() } else { Text("Pair") } }
+                            .font(Theme.label(15)).foregroundStyle(Theme.ink)
+                            .padding(.horizontal, 22).frame(height: 52).background(Capsule().fill(Theme.accent))
+                    }
+                    .buttonStyle(.plain).disabled(Pairing.normalize(code).count < 10 || store.pairingBusy)
+                }.padding(.top, 12)
+            }
+
+            CapsLabel("Can't see your Mac?").padding(.top, Theme.section)
+            Text("Type the address shown in Habla on your Mac (for example 192.168.1.20:8787).")
+                .font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).padding(.top, 10)
+            HStack(spacing: 10) {
+                TextField("192.168.1.20:8787", text: $address)
+                    .textFieldStyle(.plain).font(Theme.grotesk(16))
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .keyboardType(.URL).textInputAutocapitalization(.never)
+                    #endif
+                    .padding(.horizontal, 16).frame(height: 48)
+                    .background(Capsule().fill(Theme.surface))
+                Button("Find") {
+                    Task { if let svc = await store.lookUp(address: address) { withAnimation { chosen = svc; codeFocused = true } } }
+                }
+                .font(Theme.label(15)).foregroundStyle(Theme.ink)
+                .padding(.horizontal, 18).frame(height: 48).background(Capsule().fill(Theme.accent))
+                .buttonStyle(.plain).disabled(address.trimmingCharacters(in: .whitespaces).isEmpty)
+            }.padding(.top, 12)
+        }
+    }
+
+    func pair(_ svc: ServiceBrowser.Service) {
+        Task { await store.pair(at: svc.url, code: code) }
     }
 
     func computeStorage() -> String {

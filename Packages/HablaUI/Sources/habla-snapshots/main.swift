@@ -46,7 +46,8 @@ let phone = CGSize(width: 390, height: 844)
     var remote = manifests.dropFirst(4).map { LibraryEntry(manifest: $0) }
     if remote.isEmpty, var e = manifests.last.map(LibraryEntry.init(manifest:)) { e.id = "remote-sample"; e.title = "Persuasion"; e.author = "Jane Austen"; remote = [e] }
     store.previewState(remote: remote, connection: .connected(name: "Habla on MacBook Pro", url: URL(string: "http://192.168.1.20:8787")!),
-                       lastSync: Date().addingTimeInterval(-120))
+                       lastSync: Date().addingTimeInterval(-120),
+                       paired: .init(libraryID: "a", name: "Habla on MacBook Pro", fingerprint: String(repeating: "ab", count: 32)))
     let player = NarrationPlayer()
     let mb = BookBundle(url: BookBundle.url(for: main.1.id, in: store.library))
     player.load(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: 14, autoplay: false)
@@ -55,6 +56,11 @@ let phone = CGSize(width: 390, height: 844)
     render("p2-book", PhoneBookView(store: store, player: player, id: main.1.id, open: { _ in }, close: {}))
     render("p3-player", PhonePlayerView(player: player, close: {}, read: {}))
     render("p4-mac", PhoneMacView(store: store, close: {}))
+    let unpaired = PhoneStore(root: makeRoot("unpaired", books: []))
+    unpaired.previewState(remote: [], connection: .searching, lastSync: nil,
+                          nearby: [.init(name: "Habla on Studio iMac", url: URL(string: "https://192.168.1.31:8787")!, libraryID: "b"),
+                                   .init(name: "Habla on Manuel’s MacBook Pro", url: URL(string: "https://192.168.1.20:8787")!, libraryID: "a")])
+    render("p11-pair", PhoneMacView(store: unpaired, close: {}))
 
     let empty = PhoneStore(root: makeRoot("empty", books: []))
     empty.previewState(remote: [], connection: .searching, lastSync: nil)
@@ -97,6 +103,10 @@ let phone = CGSize(width: 390, height: 844)
     render("m2-studio-narrating", StudioWindowView(store: studio, installScript: nil, openReader: { _ in }), size: mac, scale: 2)
     let emptyStudio = StudioStore(support: makeRoot("studio-empty", books: []))
     emptyStudio.previewState(render: nil, queue: [], phoneLastSeen: nil, xteink: .looking, server: "192.168.1.20:8787")
+    let invite = PairingInvite(libraryID: "3e85", name: "Habla on Manuel’s MacBook Pro", address: "192.168.1.20:8787",
+                               fingerprint: String(repeating: "ab", count: 32), code: "7KQ2M-XW4HD")
+    render("m5-pairing", PairingSheet(pairing: .init(code: invite.code, expires: Date().addingTimeInterval(583), invite: invite.url),
+                                      macName: "Habla on Manuel’s MacBook Pro", encrypted: true, done: {}), size: CGSize(width: 680, height: 420), scale: 2)
     render("m3-studio-empty", StudioWindowView(store: emptyStudio, installScript: URL(fileURLWithPath: "/tmp/install.sh"), openReader: { _ in }), size: mac, scale: 2)
 
     let spread = ReaderModel(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: 14, style: ReaderStyle(), columns: 2)

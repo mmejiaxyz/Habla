@@ -6,14 +6,14 @@ The Mac does the heavy work (Kokoro narration); the iPhone app is under 1 MB and
 ## Get started
 
 ```sh
-Scripts/build.sh          # → dist/Habla Studio.app (Mac) and dist/Habla.ipa (iPhone)
+Scripts/build.sh          # → dist/Habla.app (Mac) and dist/Habla.ipa (iPhone)
 ```
 
-1. **Mac** — open Habla Studio (move it to Applications so it can update itself). First run: click
+1. **Mac** — open Habla (move it to Applications so it can update itself). First run: click
    **Install** in the banner (Kokoro voice engine, ~350 MB, once). Drop EPUB files on the window;
-   narration starts by itself (~5× real time on an M3 Pro). Studio opens at login and keeps working
+   narration starts by itself (~5× real time on an M3 Pro). Habla opens at login and keeps working
    with its window closed: it serves the iPhone, imports books the iPhone sends, and narrates them.
-   The Mac stays awake while narrating. *Habla Studio → Open at Login* turns that off.
+   The Mac stays awake while narrating. *Habla → Open at Login* turns that off.
 2. **iPhone** — install `Habla.ipa` with AltStore. Open it on the same Wi-Fi: it finds the Mac by
    itself (allow *Local Network*). Tap **Get** on a book from the Mac, or **＋** to add an EPUB from
    Files (or *Share → Habla* from anywhere). Books you add are readable at once; they go to the Mac,
@@ -26,10 +26,10 @@ Scripts/build.sh          # → dist/Habla Studio.app (Mac) and dist/Habla.ipa (
 ## Updates
 
 Every push to `main` runs `.github/workflows/release.yml`: tests, builds both apps, and publishes a
-release `build-N` with `Habla-Studio.zip`, `Habla.ipa` and `altstore.json`.
+release `build-N` with `Habla-Mac.zip`, `Habla.ipa` and `altstore.json`.
 
-- **Mac:** Studio checks GitHub every few hours, downloads new builds in the background and shows
-  *Restart*; otherwise it installs when you quit. *Habla Studio → Check for Updates…* checks now.
+- **Mac:** Habla checks GitHub every few hours, downloads new builds in the background and shows
+  *Restart*; otherwise it installs when you quit. *Habla → Check for Updates…* checks now.
 - **iPhone:** in AltStore, add this source once (Browse → Sources → ＋):
   `https://github.com/mmejiaxyz/Habla/releases/latest/download/altstore.json`.
   AltStore then shows and installs updates; Habla also shows *Update in AltStore* when one exists.
@@ -48,7 +48,7 @@ Packages/HablaCore   Core (no third-party deps): EPUB → bundle, Kokoro renderi
 Packages/HablaUI     App layer: design system, TextKit page engine (justified + hyphenated), narration
                      player, iPhone screens, Studio screens, stores. `habla-snapshots` renders screens.
 Apps/                Xcode project (xcodegen): Habla (iOS 17+), HablaStudio (macOS 14+)
-Tools/kokoro         Kokoro worker + installer (bundled into Studio)
+Tools/kokoro         Kokoro worker + installer (bundled into the Mac app)
 Docs/                Xteink/CrossPoint protocol notes (verified against the firmware source)
 Design/Snapshots     Rendered screens (sheet-phone.png, sheet-mac.png)
 ```

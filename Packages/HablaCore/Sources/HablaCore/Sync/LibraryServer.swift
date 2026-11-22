@@ -19,6 +19,20 @@ public final class LibraryServer: @unchecked Sendable {
     public var onInbox: (@Sendable (URL) -> Void)?
     /// Where books sent from the iPhone land before they're imported.
     public var inbox: URL { library.deletingLastPathComponent().appendingPathComponent("Inbox", isDirectory: true) }
+    /// Pairing (Habla Studio). With a registry, every `/v1` request except the hello and the
+    /// pairing call must carry a paired device's token. Without one (CLI `habla serve`) the
+    /// server is open, or uses `accessToken`.
+    public var registry: DeviceRegistry?
+    public var pairing: PairingWindow?
+    /// Random, stable id of this library (Bonjour TXT `id`): lets iPhones tell Macs apart.
+    public var libraryID: String?
+    /// TLS identity: when set, the server speaks HTTPS only.
+    public var tlsIdentity: SecIdentity?
+    public var tlsFingerprint: String?
+    /// KOReader / OPDS routes for e-readers (plain HTTP devices). Off unless the Xteink feature is on.
+    public var allowEReaders = true
+    /// A paired device made a request.
+    public var onDevice: (@Sendable (PairedDevice) -> Void)?
     /// Largest EPUB accepted from the iPhone.
     static let maxUpload = 200 * 1024 * 1024
 
@@ -32,7 +46,15 @@ public final class LibraryServer: @unchecked Sendable {
     /// Starts listening (preferred port, or any free port if taken). Returns the bound port.
     @discardableResult
     public func start(port preferred: UInt16 = SyncProtocol.defaultPort, advertise: Bool = true) async throws -> UInt16 {
-        let params = NWParameters.tcp
+        let params: NWParameters
+        if let id = tlsIdentity, let secID = sec_identity_create(id) {
+            let tls = NWProtocolTLS.Options()
+            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secID)
+            sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
+            params = NWParameters(tls: tls)
+        } else {
+            params = NWParameters.tcp
+        }
         params.allowLocalEndpointReuse = true
         let listener: NWListener
         if let l = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: preferred)!) {
@@ -41,7 +63,11 @@ public final class LibraryServer: @unchecked Sendable {
             listener = try NWListener(using: params)
         }
         if advertise {
-            listener.service = NWListener.Service(name: serviceName, type: SyncProtocol.bonjourType)
+            var txt = NWTXTRecord()
+            txt["v"] = "2"
+            if let libraryID { txt["id"] = libraryID }
+            if tlsIdentity != nil { txt["tls"] = "1" }
+            listener.service = NWListener.Service(name: serviceName, type: SyncProtocol.bonjourType, domain: nil, txtRecord: txt)
         }
         listener.newConnectionHandler = { [weak self] conn in self?.handle(conn) }
         self.listener = listener
@@ -96,6 +122,21 @@ public final class LibraryServer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Pairing
+
+    func pair(_ r: HTTPRequest) -> HTTPResponse {
+        guard let registry, let pairing, let libraryID else { return .text(404, "Not found") }
+        guard let req = try? JSON.decoder.decode(PairRequest.self, from: r.body),
+              !req.deviceID.isEmpty, req.deviceID.count <= 64 else { return .text(400, "Bad request") }
+        // The proof covers the certificate this server really has: a relay can't reuse it.
+        guard pairing.verify(proof: req.proof, fingerprint: tlsFingerprint ?? "", deviceID: req.deviceID) else {
+            return .text(403, "Wrong or expired code")
+        }
+        let token = registry.register(id: req.deviceID, name: req.deviceName)
+        onEvent?("PAIRED \(req.deviceName)")
+        return .json(PairResponse(token: token, libraryID: libraryID, name: serviceName))
+    }
+
     // MARK: - Books sent from the iPhone
 
     /// `PUT /v1/inbox/<book id>` with the EPUB as body, `X-Habla-SHA256` (full hex digest) and
@@ -129,10 +170,23 @@ public final class LibraryServer: @unchecked Sendable {
         onEvent?("\(r.method) \(r.path)")
 
         // E-readers (KOReader / CrossPoint on the Xteink) speak their own protocols and auth.
-        if parts.first == "users" || parts.first == "syncs" { return koreaderRoute(r, parts) }
-        if parts.first == "opds" { return opdsRoute(r, parts) }
+        if allowEReaders {
+            if parts.first == "users" || parts.first == "syncs" { return koreaderRoute(r, parts) }
+            if parts.first == "opds" { return opdsRoute(r, parts) }
+        }
 
-        if let token = accessToken, r.headers[SyncProtocol.tokenHeader.lowercased()] != token {
+        // Public: who this is (to tell Macs apart) and the pairing call itself.
+        if parts == ["v1"], r.method == "GET" {
+            return .json(ServerHello(name: serviceName, version: String(SyncProtocol.version), libraryID: libraryID,
+                                     pairing: registry != nil, inbox: "1"))
+        }
+        if parts == ["v1", "pair"], r.method == "POST" { return pair(r) }
+
+        let token = r.headers[SyncProtocol.tokenHeader.lowercased()]
+        if let registry {
+            guard let device = registry.device(forToken: token) else { return .text(401, "Not paired") }
+            onDevice?(device)
+        } else if let accessToken, token != accessToken {
             return .text(401, "Unauthorized")
         }
 
@@ -164,9 +218,6 @@ public final class LibraryServer: @unchecked Sendable {
             // A device clock running ahead must not win forever.
             if p.updatedAt > Date().addingTimeInterval(60) { p.updatedAt = Date() }
             return .json(progress.merge(p))
-
-        case ("GET", "v1", 1):
-            return .json(["name": serviceName, "version": String(SyncProtocol.version), "inbox": "1"])
 
         case ("PUT", "v1", 3) where parts[1] == "inbox":
             return receiveInbox(r, id: parts[2])
