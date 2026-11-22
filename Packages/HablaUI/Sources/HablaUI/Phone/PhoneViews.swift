@@ -154,6 +154,7 @@ public struct PhoneLibraryView: View {
                     Button { Task { try? await store.download(b.id) } } label: {
                         Text("Get · \(Format.bytes(bytes))").font(Theme.label(13)).foregroundStyle(Theme.ink)
                             .padding(.horizontal, 12).frame(height: 32).background(Capsule().fill(Theme.accent))
+                            .frame(minHeight: 44).contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityLabel("Download \(b.title)")
                 default: EmptyView()
                 }
@@ -292,8 +293,7 @@ public struct PhoneBookView: View {
                 ImprintView(manifest: m).padding(.top, Theme.section)
             }
             if b.availability == .local {
-                Button("Remove download") { confirmRemove = true }
-                    .font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).buttonStyle(.plain).padding(.top, 28)
+                TextLinkButton("Remove download", color: Theme.textDim) { confirmRemove = true }.padding(.top, 18)
             }
         }
         .padding(.horizontal, Theme.margin).padding(.top, 36).padding(.bottom, 60)
@@ -547,8 +547,7 @@ public struct PhoneMacView: View {
             }
             PillButton(store.syncing ? "Syncing…" : "Sync now") { Task { await store.sync() } }
                 .disabled(store.syncing).padding(.top, Theme.section)
-            Button("Unpair this Mac") { confirmUnpair = true }
-                .buttonStyle(.plain).font(Theme.grotesk(14)).foregroundStyle(Theme.accentText).padding(.top, 18)
+            TextLinkButton("Unpair this Mac") { confirmUnpair = true }.padding(.top, 8)
             CapsLabel("How it works").padding(.top, Theme.section + 8)
             Text("Keep Habla running on your Mac and both on the same Wi-Fi. New books, narrated chapters and your place sync whenever you open Habla. Other computers on the network can't see your books.")
                 .font(Theme.grotesk(15)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true).padding(.top, 10)
@@ -615,12 +614,10 @@ public struct PhoneMacView: View {
                     #endif
                     .padding(.horizontal, 16).frame(height: 48)
                     .background(Capsule().fill(Theme.surface))
-                Button("Find") {
+                CapsuleButton("Find", height: 48) {
                     Task { if let svc = await store.lookUp(address: address) { withAnimation { chosen = svc; codeFocused = true } } }
                 }
-                .font(Theme.label(15)).foregroundStyle(Theme.ink)
-                .padding(.horizontal, 18).frame(height: 48).background(Capsule().fill(Theme.accent))
-                .buttonStyle(.plain).disabled(address.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty)
             }.padding(.top, 12)
         }
     }

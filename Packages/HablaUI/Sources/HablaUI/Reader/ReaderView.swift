@@ -591,7 +591,7 @@ public struct ReaderView: View {
                         #endif
                         .onSubmit { if !findHits.isEmpty { showFind = false; openHit(0) } }
                     if !findQuery.isEmpty {
-                        Button { findQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        Button { findQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary).frame(width: 36, height: 44).contentShape(Rectangle()) }
                             .buttonStyle(.plain).accessibilityLabel("Clear")
                     }
                 }

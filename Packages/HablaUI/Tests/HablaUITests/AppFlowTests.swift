@@ -163,6 +163,21 @@ final class AppFlowTests: XCTestCase {
             XCTAssertTrue(NSLocationInRange(found.range.location, layout.characterRange(ofPage: model.page)), "match is on the page shown")
         }
         XCTAssertTrue(BookFind.search("x", in: b, manifest: m).isEmpty, "one letter doesn't search")
+
+        // Phrases typed the way people type: plain spaces (the book uses non-breaking ones in
+        // "Mr. Bennet"), straight apostrophes and quotes (the book has curly ones).
+        for phrase in ["mr. bennet", "Mr.  Bennet replied", "it is a truth universally acknowledged", "don't", "\"my dear mr. bennet,\""] {
+            let found = BookFind.search(phrase, in: b, manifest: m)
+            XCTAssertFalse(found.isEmpty, "no results for \(phrase)")
+            guard let hit = found.first else { continue }
+            model.show(hit, query: phrase)
+            let range = try XCTUnwrap(model.found?.range, phrase)
+            let layout = try XCTUnwrap(model.layout)
+            let shown = (layout.chapter.text.string as NSString).substring(with: range)
+            XCTAssertEqual(FoldedText(shown).chars, FoldedText.query(phrase), "highlight covers exactly “\(phrase)”, got “\(shown)”")
+            XCTAssertTrue(NSLocationInRange(range.location, layout.characterRange(ofPage: model.page)))
+        }
+        XCTAssertGreaterThan(BookFind.search("mr. bennet", in: b, manifest: m).count, 50)
     }
 
     func testImprintRecordsTheModel() async throws {

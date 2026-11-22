@@ -61,7 +61,7 @@ public struct StudioWindowView: View {
             HStack {
                 Text("HABLA").font(Theme.label(10)).tracking(1.4).foregroundStyle(Theme.text)
                 Spacer()
-                Button { showImporter = true } label: { Image(systemName: "plus").font(.system(size: 14, weight: .medium)) }
+                Button { showImporter = true } label: { Image(systemName: "plus").font(.system(size: 15, weight: .medium)).frame(width: 32, height: 32).contentShape(Rectangle()) }
                     .buttonStyle(.plain).foregroundStyle(Theme.accentText).help("Add EPUB books")
             }
             .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 18)
@@ -182,8 +182,8 @@ public struct StudioWindowView: View {
         return HStack(alignment: .top) {
             deviceRow(on: on, name: "Xteink", detail: detail)
             if case .working = store.xteink { ProgressView().controlSize(.small).padding(.top, 12).padding(.trailing, 20) }
-            else if on || { if case .failed = store.xteink { return true }; return false }() { Button(on ? "Send now" : "Try again") { store.kickXteink() }.buttonStyle(.plain).font(Theme.grotesk(12))
-                .foregroundStyle(Theme.accentText).padding(.top, 12).padding(.trailing, 24) }
+            else if on || { if case .failed = store.xteink { return true }; return false }() { TextLinkButton(on ? "Send now" : "Try again", size: 12) { store.kickXteink() }
+                .padding(.top, 2).padding(.trailing, 24) }
         }
     }
 
@@ -212,9 +212,7 @@ public struct StudioWindowView: View {
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.65))
                 }
                 Spacer()
-                Button(updater.canInstall ? "Restart" : "Download") { updater.installAndRelaunch() }
-                    .buttonStyle(.plain).font(Theme.label(13)).foregroundStyle(Theme.ink)
-                    .padding(.horizontal, 16).frame(height: 32).background(Capsule().fill(Theme.screen.opacity(0.7)))
+                CapsuleButton(updater.canInstall ? "Restart" : "Download", fill: Theme.screen.opacity(0.7)) { updater.installAndRelaunch() }
             }
             .padding(.horizontal, 24).padding(.vertical, 14)
             .background(Theme.accent.opacity(0.55))
@@ -222,7 +220,7 @@ public struct StudioWindowView: View {
             HStack {
                 Text(message).font(Theme.grotesk(12)).foregroundStyle(Theme.textDim)
                 Spacer()
-                Button("OK") { updater.dismissMessage() }.buttonStyle(.plain).font(Theme.grotesk(12)).foregroundStyle(Theme.accentText)
+                TextLinkButton("OK", size: 12) { updater.dismissMessage() }
             }
             .padding(.horizontal, 24).padding(.vertical, 10)
             .background(Theme.surface)
@@ -255,9 +253,7 @@ public struct StudioWindowView: View {
             Spacer()
             if case .installing = store.kokoro { ProgressView().controlSize(.small) }
             else if let script = installScript {
-                Button(store.kokoro == .missing ? "Install" : "Try again") { store.installKokoro(script: script) }
-                    .buttonStyle(.plain).font(Theme.label(13)).foregroundStyle(Theme.ink)
-                    .padding(.horizontal, 16).frame(height: 32).background(Capsule().fill(Theme.screen.opacity(0.7)))
+                CapsuleButton(store.kokoro == .missing ? "Install" : "Try again", fill: Theme.screen.opacity(0.7)) { store.installKokoro(script: script) }
             }
         }
         .padding(.horizontal, 24).padding(.vertical, 14)
@@ -387,8 +383,7 @@ public struct StudioWindowView: View {
                     Text(voiceNote(v)).font(Theme.grotesk(12)).foregroundStyle(Theme.textDim)
                 }
                 Spacer()
-                Button(store.previewing == v ? "Playing…" : "▶ Preview") { store.preview(v) }
-                    .buttonStyle(.plain).font(Theme.grotesk(12)).foregroundStyle(Theme.accentText)
+                TextLinkButton(store.previewing == v ? "Playing…" : "▶ Preview", size: 12) { store.preview(v) }
                     .disabled(store.kokoro != .ready || store.previewing != nil)
                     .help(store.kokoro == .ready ? "Hear this voice" : "Install the voice engine first")
             }

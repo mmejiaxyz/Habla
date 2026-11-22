@@ -267,6 +267,48 @@ public struct PillButton: View {
     }
 }
 
+/// A small text action ("Unpair this Mac", "Preview"): the whole row around the words is
+/// tappable (at least 44 pt tall), not just the letters.
+public struct TextLinkButton: View {
+    var title: String
+    var size: CGFloat
+    var color: Color
+    var action: () -> Void
+    public init(_ title: String, size: CGFloat = 14, color: Color = Theme.accentText, action: @escaping () -> Void) {
+        self.title = title; self.size = size; self.color = color; self.action = action
+    }
+    public var body: some View {
+        Button(action: action) {
+            Text(title).font(Theme.grotesk(size)).foregroundStyle(color)
+                .padding(.vertical, 8).padding(.horizontal, 6)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, -6)   // keep the text aligned with its neighbours
+    }
+}
+
+/// A compact capsule action ("Install", "Restart", "Find"): the whole capsule is the button.
+public struct CapsuleButton: View {
+    var title: String
+    var fill: Color
+    var height: CGFloat
+    var action: () -> Void
+    public init(_ title: String, fill: Color = Theme.accent, height: CGFloat = 36, action: @escaping () -> Void) {
+        self.title = title; self.fill = fill; self.height = height; self.action = action
+    }
+    public var body: some View {
+        Button(action: action) {
+            Text(title).font(Theme.label(height > 40 ? 15 : 13)).foregroundStyle(Theme.ink)
+                .padding(.horizontal, height > 40 ? 20 : 16).frame(minHeight: height)
+                .background(Capsule().fill(fill))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 public enum Greeting {
     public static func now(_ date: Date = Date()) -> String {
         switch Calendar.current.component(.hour, from: date) {
