@@ -66,6 +66,7 @@ public struct PhoneRoot: View {
                 }
             }
             store.start()
+            store.startLiveUpdates()
         }
         // EPUBs opened with Habla from Files, Mail, Safari or the share sheet.
         .onOpenURL { url in
@@ -75,8 +76,11 @@ public struct PhoneRoot: View {
         }
         .onChange(of: phase) { _, p in
             switch p {
-            case .active: store.start()                 // restart discovery after sleep / network change
+            case .active:
+                store.start()                           // restart discovery after sleep / network change
+                store.startLiveUpdates()
             case .inactive, .background:
+                store.stopLiveUpdates()
                 player.flush()
                 saveReaderIfNeeded()
                 Task { await store.sync() }

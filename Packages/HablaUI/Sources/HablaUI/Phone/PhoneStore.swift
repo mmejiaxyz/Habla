@@ -264,6 +264,33 @@ public final class PhoneStore: ObservableObject {
         checkForAppUpdate()
     }
 
+    // MARK: Live updates
+
+    private var liveTask: Task<Void, Never>?
+
+    /// While the app is open: a tiny library check every few seconds; a full sync as soon as
+    /// something changed on the Mac (new book, new chapters), and a regular one for positions.
+    public func startLiveUpdates(every seconds: Double = 4) {
+        liveTask?.cancel()
+        liveTask = Task { [weak self] in
+            var ticks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                guard let self, !Task.isCancelled else { return }
+                ticks += 1
+                guard !self.syncing, let client = self.client else { continue }
+                if let fresh = try? await client.library() {
+                    let changed = fresh.map { "\($0.id):\($0.revision)" } != self.remote.map { "\($0.id):\($0.revision)" }
+                    if changed || ticks % 8 == 0 { await self.sync() }
+                } else if ticks % 4 == 0 {
+                    await self.sync()   // Mac gone: let sync() update the status line
+                }
+            }
+        }
+    }
+
+    public func stopLiveUpdates() { liveTask?.cancel(); liveTask = nil }
+
     // MARK: Pairing
 
     var deviceName: String {
@@ -440,6 +467,10 @@ public final class PhoneStore: ObservableObject {
                 return
             } catch SyncError.integrity where attempt < 2 {
                 attempt += 1
+            } catch SyncError.unreachable where attempt < 3 {
+                // Wi-Fi hiccup or the Mac busy: files already verified are kept, so this resumes.
+                attempt += 1
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
             } catch {
                 if !silent { self.error = "Couldn't download: \(Self.describe(error))" }
                 throw error

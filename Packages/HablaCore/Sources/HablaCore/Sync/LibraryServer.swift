@@ -100,12 +100,19 @@ public final class LibraryServer: @unchecked Sendable {
 
     private func handle(_ conn: NWConnection) {
         conn.start(queue: queue)
+        let id = ObjectIdentifier(conn)
         receiveRequest(conn, buffer: Data())
-        // Drop clients that connect and never finish a request.
-        queue.asyncAfter(deadline: .now() + 180) { [weak conn] in
-            if let conn, conn.state != .cancelled { conn.cancel() }
+        // Drop clients that connect and never finish their request (uploads get longer).
+        // Responses are never cut: a big chapter on slow Wi-Fi takes as long as it takes.
+        queue.asyncAfter(deadline: .now() + 120) { [weak self, weak conn] in
+            guard let self, let conn else { return }
+            if !self.answered.contains(id), conn.state != .cancelled { conn.cancel() }
+            self.answered.remove(id)
         }
     }
+
+    /// Connections whose request arrived (touched only on `queue`).
+    private var answered = Set<ObjectIdentifier>()
 
     private func receiveRequest(_ conn: NWConnection, buffer: Data) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, done, error in
@@ -118,6 +125,7 @@ public final class LibraryServer: @unchecked Sendable {
                 else { self.receiveRequest(conn, buffer: buf) }
                 return
             }
+            self.answered.insert(ObjectIdentifier(conn))
             self.send(conn, self.route(request))
         }
     }
@@ -244,7 +252,8 @@ public final class LibraryServer: @unchecked Sendable {
     private func send(_ conn: NWConnection, _ response: HTTPResponse) {
         switch response.body {
         case .data(let d):
-            conn.send(content: response.head(length: d.count) + d, completion: .contentProcessed { _ in conn.cancel() })
+            conn.send(content: response.head(length: d.count) + d, contentContext: .finalMessage, isComplete: true,
+                      completion: .contentProcessed { [weak self] _ in self?.finish(conn) })
         case .file(let url):
             guard let handle = try? FileHandle(forReadingFrom: url),
                   let size = try? handle.seekToEnd() else {
@@ -256,12 +265,25 @@ public final class LibraryServer: @unchecked Sendable {
         }
     }
 
+    /// Ends a response without cutting it short: the last bytes (and TLS close) have been
+    /// handed over, so wait for the client to hang up before releasing the connection.
+    /// Closing right away can reset the connection while data is still in flight
+    /// ("The network connection was lost" on the iPhone).
+    private func finish(_ conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] _, _, done, error in
+            if done || error != nil { conn.cancel() } else { self?.finish(conn) }
+        }
+        queue.asyncAfter(deadline: .now() + 30) { [weak conn] in
+            if let conn, conn.state != .cancelled { conn.cancel() }
+        }
+    }
+
     private func streamFile(_ handle: FileHandle, to conn: NWConnection) {
         let chunk = (try? handle.read(upToCount: 256 * 1024)) ?? nil
         guard let chunk, !chunk.isEmpty else {
             try? handle.close()
             conn.send(content: nil, contentContext: .finalMessage, isComplete: true,
-                      completion: .contentProcessed { _ in conn.cancel() })
+                      completion: .contentProcessed { [weak self] _ in self?.finish(conn) })
             return
         }
         conn.send(content: chunk, completion: .contentProcessed { [weak self] error in

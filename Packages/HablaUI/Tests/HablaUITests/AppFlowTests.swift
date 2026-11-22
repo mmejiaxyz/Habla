@@ -9,6 +9,15 @@ final class AppFlowTests: XCTestCase {
     static let epub: URL = ProcessInfo.processInfo.environment["HABLA_TEST_EPUB"].map { URL(fileURLWithPath: $0) }
         ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../../T_epub/pride-se.epub").standardizedFileURL
 
+    /// A tiny, distinct EPUB (a copy of the test book with a different title).
+    static func makeSmallEPUB(in dir: URL) throws -> URL {
+        let src = try Data(contentsOf: epub)
+        let out = dir.appendingPathComponent("second.epub")
+        // Appending bytes after the ZIP's end keeps it readable but gives it a new identity.
+        try (src + Data("habla-second-book".utf8)).write(to: out)
+        return out
+    }
+
     func temp() -> URL {
         let u = FileManager.default.temporaryDirectory.appendingPathComponent("habla-ui-\(UUID().uuidString)")
         try! FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
@@ -80,6 +89,16 @@ final class AppFlowTests: XCTestCase {
         }
         XCTAssertEqual(phone.manifest(id)?.chapters.filter { $0.audioStatus == .ready }.count, 3)
         XCTAssertTrue(phone.updating.isEmpty)
+
+        // A book added on the Mac shows up by itself while the app is open (no "Sync now").
+        phone.startLiveUpdates(every: 0.3)
+        defer { phone.stopLiveUpdates() }
+        let second = try BookImporter().importEPUB(at: Self.makeSmallEPUB(in: temp()), into: lib).manifest().id
+        for _ in 0..<40 where !phone.books.contains(where: { $0.id == second }) {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertTrue(phone.books.contains { $0.id == second }, "new Mac book should appear without tapping Sync now")
+        phone.stopLiveUpdates()
 
         // Mac unreachable → phone stays usable offline and says so.
         server.stop()

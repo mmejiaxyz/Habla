@@ -578,6 +578,34 @@ final class XteinkTests: XCTestCase {
         XCTAssertFalse(disk.contains(paired.token))
     }
 
+    /// Real-size transfer over TLS on the Wi-Fi address (not loopback). Opt-in:
+    /// HABLA_STRESS_LIBRARY=<a Habla library folder> swift test --filter testLargeBookOverTLS
+    func testLargeBookOverTLS() async throws {
+        guard #available(macOS 15.0, *) else { throw XCTSkip("needs macOS 15") }
+        guard let libPath = ProcessInfo.processInfo.environment["HABLA_STRESS_LIBRARY"] else { throw XCTSkip("set HABLA_STRESS_LIBRARY") }
+        guard let ip = LocalNetwork.primaryIPv4() else { throw XCTSkip("no Wi-Fi address") }
+        let lib = URL(fileURLWithPath: libPath)
+        let root = Fixtures.tempDir()
+        let server = LibraryServer(library: lib, progress: ProgressStore(fileURL: root.appendingPathComponent("p.json")))
+        let tls = try TLSIdentity.loadOrCreate(in: root.appendingPathComponent("Security"))
+        server.tlsIdentity = tls.identity; server.tlsFingerprint = tls.fingerprint
+        server.registry = DeviceRegistry(fileURL: root.appendingPathComponent("d.json"))
+        let window = PairingWindow(); server.pairing = window; server.libraryID = "stress"
+        let port = try await server.start(port: 0, advertise: false)
+        defer { server.stop() }
+        let url = URL(string: "https://\(ip):\(port)")!
+        let trust = PinnedTrust(fingerprint: tls.fingerprint)
+        let pair = try await SyncClient(baseURL: url, session: trust.session()).pair(code: window.open(), fingerprint: tls.fingerprint, deviceID: "s", deviceName: "stress")
+        let client = SyncClient(baseURL: url, accessToken: pair.token, session: trust.session())
+        let books = try await client.library().sorted { $0.totalBytes > $1.totalBytes }
+        let book = try XCTUnwrap(books.first)
+        let t0 = Date()
+        let summary = try await client.syncBook(book.id, into: root.appendingPathComponent("Phone"))
+        let dt = Date().timeIntervalSince(t0)
+        print("STRESS \(book.title): \(summary.filesDownloaded) files, \(summary.bytesDownloaded / 1_000_000) MB in \(String(format: "%.1f", dt)) s")
+        XCTAssertGreaterThan(summary.filesDownloaded, 0)
+    }
+
     func testPairingInviteRoundTrip() {
         let inv = PairingInvite(libraryID: "abc", name: "Habla on Mac", address: "192.168.1.2:8787",
                                 fingerprint: String(repeating: "c", count: 64), code: "ABCDE-FGH12")

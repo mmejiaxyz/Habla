@@ -59,7 +59,7 @@ public struct StudioWindowView: View {
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("HABLA STUDIO").font(Theme.label(10)).tracking(1.4).foregroundStyle(Theme.text)
+                Text("HABLA").font(Theme.label(10)).tracking(1.4).foregroundStyle(Theme.text)
                 Spacer()
                 Button { showImporter = true } label: { Image(systemName: "plus").font(.system(size: 14, weight: .medium)) }
                     .buttonStyle(.plain).foregroundStyle(Theme.accentText).help("Add EPUB books")

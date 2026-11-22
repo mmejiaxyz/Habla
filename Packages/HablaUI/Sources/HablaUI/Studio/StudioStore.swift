@@ -180,11 +180,15 @@ public final class StudioStore: ObservableObject {
 
     private var started = false
     private var devicesRefreshed = Date.distantPast
+    private var serving: NSObjectProtocol?
 
     public func start() {
         guard !started else { return }   // window reopened: keep the one server / watcher
         started = true
         refreshWorker()
+        // Keep serving at full speed with no window open (no App Nap); the Mac may still sleep.
+        serving = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
+                                                        reason: "Sharing your library with your iPhone")
         server.onInbox = { [weak self] file in
             Task { @MainActor in self?.importFiles([file], fromPhone: true) }
         }
