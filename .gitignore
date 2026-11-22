@@ -1,0 +1,15 @@
+.DS_Store
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+xcuserdata/
+Tools/kokoro/.venv/
+Tools/kokoro/models/
+Tools/kokoro/setup.log
+Output/
+T_epub/
+Tools/bakeoff/
+dist/
+Apps/Habla.xcodeproj/
+.swiftpm/
+*.part

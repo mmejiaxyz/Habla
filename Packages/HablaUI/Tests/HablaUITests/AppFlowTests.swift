@@ -1,0 +1,203 @@
+import XCTest
+import HablaCore
+@testable import HablaUI
+
+/// App-level flows with the real stores (no UI): what the iPhone and Mac apps actually do.
+@MainActor
+final class AppFlowTests: XCTestCase {
+    /// Pride and Prejudice (Standard Ebooks). Set HABLA_TEST_EPUB, or put it in T_epub/ (git-ignored).
+    static let epub: URL = ProcessInfo.processInfo.environment["HABLA_TEST_EPUB"].map { URL(fileURLWithPath: $0) }
+        ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../../T_epub/pride-se.epub").standardizedFileURL
+
+    func temp() -> URL {
+        let u = FileManager.default.temporaryDirectory.appendingPathComponent("habla-ui-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+        return u
+    }
+
+    /// A Mac library with Pride and Prejudice, chapters 1–2 narrated (fake tone voice).
+    func macLibrary() async throws -> (URL, BookBundle, RenderPipeline) {
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.epub.path), "test EPUB missing")
+        let lib = temp()
+        let b = try BookImporter().importEPUB(at: Self.epub, into: lib)
+        let pipeline = RenderPipeline(engine: ToneEngine(), cacheDirectory: lib.appendingPathComponent(".cache"))
+        try await pipeline.render(b, voice: VoiceInfo(engine: "tone", voiceID: "tone"), only: [1, 2])
+        return (lib, b, pipeline)
+    }
+
+    func testPhoneSyncsBooksPositionsAndNewChapters() async throws {
+        let (lib, b, pipeline) = try await macLibrary()
+        let id = try b.manifest().id
+        let server = LibraryServer(library: lib, progress: ProgressStore(fileURL: lib.appendingPathComponent("p.json")))
+        let port = try await server.start(port: 0, advertise: false)
+        defer { server.stop() }
+
+        let phone = PhoneStore(root: temp())
+        phone.manualAddress = "127.0.0.1:\(port)"
+        await phone.connectManually()
+        XCTAssertTrue(phone.isConnected)
+        guard case .remote = phone.books.first(where: { $0.id == id })?.availability else { return XCTFail("book should be on the Mac") }
+
+        // Download.
+        let t0 = Date()
+        try await phone.download(id)
+        let elapsed = Date().timeIntervalSince(t0)
+        XCTAssertEqual(phone.books.first { $0.id == id }?.availability, .local)
+        XCTAssertLessThan(elapsed, 5, "LAN download of a 2-chapter book should be quick")
+        XCTAssertEqual(phone.manifest(id)?.chapters.filter { $0.audioStatus == .ready }.count, 2)
+
+        // Phone position reaches the Mac (coalesced push ~2 s).
+        phone.savePosition(book: id, chapter: 2, sentence: 7, audioTime: 30, mode: .listening)
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        XCTAssertEqual(server.progress.position(for: id)?.sentence, 7)
+
+        // The Mac (or the Xteink through it) moves on → the phone adopts it on sync.
+        server.progress.merge(ReadingPosition(bookID: id, chapter: 3, sentence: 2, mode: .reading, deviceID: "koreader:X4"))
+        await phone.sync()
+        XCTAssertEqual(phone.progress.position(for: id)?.chapter, 3)
+
+        // The Mac narrates another chapter → the phone updates the book by itself on sync.
+        try await pipeline.render(b, voice: VoiceInfo(engine: "tone", voiceID: "tone"), only: [3])
+        await phone.sync()
+        XCTAssertEqual(phone.books.first { $0.id == id }?.availability, .local, "stays usable while updating")
+        for _ in 0..<50 where phone.manifest(id)?.chapters.filter({ $0.audioStatus == .ready }).count != 3 {
+            try await Task.sleep(nanoseconds: 100_000_000)   // background update
+        }
+        XCTAssertEqual(phone.manifest(id)?.chapters.filter { $0.audioStatus == .ready }.count, 3)
+        XCTAssertTrue(phone.updating.isEmpty)
+
+        // Mac unreachable → phone stays usable offline and says so.
+        server.stop()
+        await phone.sync()
+        XCTAssertFalse(phone.isConnected)
+        XCTAssertEqual(phone.books.first { $0.id == id }?.availability, .local)
+    }
+
+    func testWordUnderlineSurvivesRelayout() throws {
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.epub.path))
+        let lib = temp().appendingPathComponent("Library")
+        let b = try BookImporter().importEPUB(at: Self.epub, into: lib)
+        let m = try b.manifest()
+        let model = ReaderModel(bundle: b, manifest: m, chapter: 5, sentence: 40, style: ReaderStyle())
+        model.setPageSize(CGSize(width: 338, height: 700))
+        let layout = try XCTUnwrap(model.layout)
+        // Find a word by scanning the page for a point that lands on one.
+        var hit: NSRange?
+        for y in stride(from: 40.0, to: 600, by: 23) where hit == nil {
+            hit = layout.wordRange(at: CGPoint(x: 120, y: y), onPage: model.page)
+        }
+        let word = try XCTUnwrap(hit)
+        let text = (layout.chapter.text.string as NSString).substring(with: word)
+        XCTAssertFalse(text.isEmpty)
+        XCTAssertTrue(text.unicodeScalars.allSatisfy { CharacterSet.letters.contains($0) || "’'-".unicodeScalars.contains($0) }, text)
+        model.addUnderline(word)
+        XCTAssertEqual(model.underlineRanges(), [word])
+        // Bigger text: same words underlined, from a fresh store read back from disk.
+        model.style = model.style.larger()
+        let again = (try XCTUnwrap(model.layout).chapter.text.string as NSString).substring(with: try XCTUnwrap(model.underlineRanges().first))
+        XCTAssertEqual(again, text)
+        let disk = AnnotationStore(fileURL: lib.deletingLastPathComponent().appendingPathComponent("annotations.json"))
+        XCTAssertEqual(disk.underlines(book: m.id).first?.text, text)
+        model.removeUnderline(try XCTUnwrap(model.underline(covering: word)))
+        // "Sentence" means the whole sentence, not the shorter piece narration uses.
+        let first = ReaderModel(bundle: b, manifest: m, chapter: m.chapters.first { !$0.isFrontMatter }!.index, sentence: nil, style: ReaderStyle())
+        first.setPageSize(CGSize(width: 338, height: 700))
+        let ns = try XCTUnwrap(first.layout).chapter.text.string as NSString
+        let wife = ns.range(of: "wife.")
+        let sentence = ns.substring(with: try XCTUnwrap(first.sentenceRange(around: wife.location)))
+        XCTAssertTrue(sentence.hasPrefix("It is a truth"), sentence)
+        XCTAssertTrue(model.underlineRanges().isEmpty)
+    }
+
+    func testReaderNeverLosesThePlace() throws {
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.epub.path))
+        let lib = temp()
+        let b = try BookImporter().importEPUB(at: Self.epub, into: lib)
+        let m = try b.manifest()
+        let model = ReaderModel(bundle: b, manifest: m, chapter: 5, sentence: 40, style: ReaderStyle())
+        model.setPageSize(CGSize(width: 338, height: 700))
+        let layout = try XCTUnwrap(model.layout)
+        XCTAssertGreaterThan(layout.pageCount, 1)
+        // The requested sentence is on the opened page.
+        XCTAssertEqual(layout.page(forSentence: 40), model.page)
+
+        // Every page's first sentence maps back to that page (no gaps, no overlaps).
+        var seen = Set<Int>()
+        for p in 0..<layout.pageCount {
+            let s = try XCTUnwrap(layout.firstSentence(onPage: p), "page \(p) has no sentence")
+            XCTAssertLessThanOrEqual(layout.page(forSentence: s)!, p)
+            seen.insert(s)
+        }
+        XCTAssertEqual(seen.count, layout.pageCount, "each page starts at a distinct sentence")
+
+        // Font size and theme changes keep the same sentence on screen.
+        model.go(chapter: 5, sentence: 60)
+        let anchor = try XCTUnwrap(model.currentSentence)
+        model.style = model.style.larger().larger()
+        XCTAssertEqual(model.layout?.page(forSentence: anchor), model.page)
+        model.style = ReaderStyle(theme: .focus, fontSize: model.style.fontSize)
+        XCTAssertEqual(model.layout?.page(forSentence: anchor), model.page)
+        model.setPageSize(CGSize(width: 600, height: 500))   // rotation / window resize
+        XCTAssertEqual(model.layout?.page(forSentence: anchor), model.page)
+
+        // Paging across chapters both ways.
+        model.go(chapter: 5, sentence: 0)
+        model.previous()
+        XCTAssertEqual(model.chapter, 4)
+        XCTAssertEqual(model.page, model.pageCount - 1, "going back lands on the previous chapter's last page")
+        model.next()
+        XCTAssertEqual(model.chapter, 5); XCTAssertEqual(model.page, 0)
+
+        // Last page of the book: forward is a no-op, never a crash.
+        let last = m.chapters.last!.index
+        model.go(chapter: last, sentence: Int.max)
+        for _ in 0..<50 { model.next() }
+        XCTAssertEqual(model.chapter, last)
+        XCTAssertFalse(model.canGoForward)
+
+        // Narration following: highlight moves pages only if the reader was on the read page.
+        model.go(chapter: 5, sentence: 0)
+        let farSentence = m.chapters.first { $0.index == 5 }!.sentenceCount - 1
+        model.follow(chapter: 5, sentence: 0)
+        model.follow(chapter: 5, sentence: farSentence)       // jumped far (seek): follows
+        XCTAssertEqual(model.layout?.page(forSentence: farSentence), model.page)
+        model.go(chapter: 2, sentence: 0)                     // user browses elsewhere
+        model.follow(chapter: 5, sentence: farSentence - 1)
+        XCTAssertEqual(model.chapter, 2, "doesn't yank someone browsing another chapter")
+
+        // Mac spread: pages stay aligned to the left page.
+        let spread = ReaderModel(bundle: b, manifest: m, chapter: 5, sentence: 40, style: ReaderStyle(), columns: 2)
+        spread.setPageSize(CGSize(width: 500, height: 640))
+        XCTAssertEqual(spread.page % 2, 0)
+        spread.next(); XCTAssertEqual(spread.page % 2, 0)
+    }
+
+    func testPlayerMapsSentencesToAudio() async throws {
+        let (lib, b, _) = try await macLibrary()
+        _ = lib
+        let m = try b.manifest()
+        let player = NarrationPlayer()
+        var saved: [(Int, Int)] = []
+        player.onPosition = { _, c, s, _ in saved.append((c, s)) }
+
+        // Chapter 0 is front matter (no audio): starts at the first narrated chapter.
+        player.load(bundle: b, manifest: m, chapter: 0, sentence: nil, autoplay: false)
+        XCTAssertEqual(player.chapter, 1)
+        XCTAssertNil(player.message)
+
+        player.jump(chapter: 1, sentence: 5, autoplay: false)
+        XCTAssertEqual(player.sentence, 5)
+        let timing = try XCTUnwrap(b.timing(m.chapters[1]))
+        XCTAssertEqual(player.time, timing.sentences[5].start, accuracy: 0.01)
+
+        player.skip(10_000)             // past the end → next narrated chapter
+        XCTAssertEqual(player.chapter, 2)
+        player.skip(-10_000)            // before the start → previous chapter
+        XCTAssertEqual(player.chapter, 1)
+
+        // A chapter that isn't narrated yet: clear message, no crash.
+        player.load(bundle: b, manifest: m, chapter: 30, sentence: nil, autoplay: false)
+        XCTAssertNotNil(player.message)
+        XCTAssertFalse(saved.isEmpty, "seeks save the position")
+    }
+}

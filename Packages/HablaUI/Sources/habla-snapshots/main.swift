@@ -1,0 +1,108 @@
+import SwiftUI
+import AppKit
+import HablaCore
+import HablaUI
+
+// habla-snapshots <fixture-library> <out-dir>
+// Renders the real iPhone + Mac screens with real books (offscreen, no simulator).
+
+let args = CommandLine.arguments
+guard args.count >= 3 else { print("usage: habla-snapshots <library> <out>"); exit(1) }
+let fixture = URL(fileURLWithPath: args[1]), out = URL(fileURLWithPath: args[2])
+let fm = FileManager.default
+try? fm.createDirectory(at: out, withIntermediateDirectories: true)
+let phone = CGSize(width: 390, height: 844)
+
+@MainActor func render<V: View>(_ name: String, _ view: V, size: CGSize = phone, scale: CGFloat = 3, dark: Bool = false) {
+    let r = ImageRenderer(content: view.frame(width: size.width, height: size.height)
+        .environment(\.staticLayout, true).environment(\.colorScheme, dark ? .dark : .light))
+    r.scale = scale
+    guard let cg = r.cgImage else { print("✗ \(name)"); return }
+    try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: out.appendingPathComponent("\(name).png"))
+    print("✓ \(name)")
+}
+
+@MainActor func makeRoot(_ name: String, books: [URL]) -> URL {
+    let root = fm.temporaryDirectory.appendingPathComponent("habla-snap-\(name)-\(UUID().uuidString.prefix(6))")
+    let lib = root.appendingPathComponent("Library")
+    try! fm.createDirectory(at: lib, withIntermediateDirectories: true)
+    for b in books { try! fm.copyItem(at: b, to: lib.appendingPathComponent(b.lastPathComponent)) }
+    return root
+}
+
+@MainActor func run() {
+    let bundles = try! fm.contentsOfDirectory(at: fixture, includingPropertiesForKeys: nil).filter { $0.pathExtension == "habla" }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    let manifests = bundles.map { try! BookBundle(url: $0).manifest() }
+    let withAudio = zip(bundles, manifests).first { $0.1.chapters.contains { $0.audioStatus == .ready } }
+    let main = withAudio ?? (bundles[0], manifests[0])
+    let audioChapter = main.1.chapters.first { $0.audioStatus == .ready }?.index ?? main.1.chapters.first { !$0.isFrontMatter }!.index
+
+    // ---- iPhone ----
+    let root = makeRoot("phone", books: Array(bundles.prefix(4)))
+    let store = PhoneStore(root: root)
+    store.savePosition(book: main.1.id, chapter: audioChapter, sentence: 14, audioTime: 60, mode: .listening)
+    if bundles.count > 1 { store.savePosition(book: manifests[bundles.firstIndex(of: main.0) == 0 ? 1 : 0].id, chapter: 3, sentence: 10, audioTime: nil, mode: .reading) }
+    var remote = manifests.dropFirst(4).map { LibraryEntry(manifest: $0) }
+    if remote.isEmpty, var e = manifests.last.map(LibraryEntry.init(manifest:)) { e.id = "remote-sample"; e.title = "Persuasion"; e.author = "Jane Austen"; remote = [e] }
+    store.previewState(remote: remote, connection: .connected(name: "Habla on MacBook Pro", url: URL(string: "http://192.168.1.20:8787")!),
+                       lastSync: Date().addingTimeInterval(-120))
+    let player = NarrationPlayer()
+    let mb = BookBundle(url: BookBundle.url(for: main.1.id, in: store.library))
+    player.load(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: 14, autoplay: false)
+
+    render("p1-library", PhoneLibraryView(store: store, player: player, open: { _ in }))
+    render("p2-book", PhoneBookView(store: store, player: player, id: main.1.id, open: { _ in }, close: {}))
+    render("p3-player", PhonePlayerView(player: player, close: {}, read: {}))
+    render("p4-mac", PhoneMacView(store: store, close: {}))
+
+    let empty = PhoneStore(root: makeRoot("empty", books: []))
+    empty.previewState(remote: [], connection: .searching, lastSync: nil)
+    render("p5-library-empty", PhoneLibraryView(store: empty, player: NarrationPlayer(), open: { _ in }))
+
+    // Reader pages: compute the page size the way ReaderView does on a phone.
+    func reader(_ name: String, _ theme: ReaderTheme, chrome: Bool, chapter: Int, sentence: Int?, highlight: Bool, size: CGFloat = 19) {
+        let model = ReaderModel(bundle: mb, manifest: main.1, chapter: chapter, sentence: sentence, style: ReaderStyle(theme: theme, fontSize: size))
+        model.setPageSize(CGSize(width: phone.width - 52, height: phone.height - 74 - 22))
+        if highlight, let s = sentence { model.follow(chapter: chapter, sentence: s) }
+        render(name, ReaderView(model: model, player: highlight ? player : NarrationPlayer(), chrome: chrome, onClose: {}))
+    }
+    reader("p6-reader-original", .original, chrome: false, chapter: audioChapter, sentence: nil, highlight: false)
+    reader("p7-reader-listening", .original, chrome: false, chapter: audioChapter, sentence: 14, highlight: true)
+    reader("p8-reader-calm-controls", .calm, chrome: true, chapter: audioChapter, sentence: 14, highlight: true)
+    reader("p9-reader-focus-large", .focus, chrome: false, chapter: audioChapter + 1, sentence: nil, highlight: false, size: 24)
+    do {
+        let model = ReaderModel(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: nil, style: ReaderStyle())
+        model.setPageSize(CGSize(width: phone.width - 52, height: phone.height - 74 - 22))
+        if let l = model.layout {
+            for u in model.annotations.underlines(book: main.1.id) { model.removeUnderline(u) }
+            var hits: [NSRange] = []
+            for y in stride(from: 120.0, to: 420, by: 23) { if let w = l.wordRange(at: CGPoint(x: 150, y: y), onPage: model.page) { hits.append(w) } }
+            if let r = hits.first, let s = model.sentenceRange(around: r.location) { model.addUnderline(s) }
+        }
+        render("p10-reader-word", ReaderView(model: model, player: NarrationPlayer(), onClose: {}, previewWordAt: CGPoint(x: 200, y: 300)))
+    }
+
+    // ---- Mac ----
+    let mac = CGSize(width: 1240, height: 800)
+    let studioRoot = makeRoot("studio", books: bundles)
+    let studio = StudioStore(support: studioRoot)
+    studio.selection = main.1.id
+    let other = manifests.first { $0.id != main.1.id }
+    studio.previewState(render: other.map { StudioStore.RenderState(bookID: $0.id, chapterTitle: $0.chapters[min(3, $0.chapters.count - 1)].title, sentence: 41, sentenceCount: 120, chaptersDone: 2, chaptersTotal: 20, secondsLeft: 3900) },
+                        queue: other.map { [$0.id] } ?? [], phoneLastSeen: Date().addingTimeInterval(-90),
+                        xteink: .done("4 books on Xteink X4 · up to date"), server: "192.168.1.20:8787")
+    render("m1-studio", StudioWindowView(store: studio, installScript: URL(fileURLWithPath: "/tmp/install.sh"), openReader: { _ in }), size: mac, scale: 2)
+    if let o = other { studio.selection = o.id }
+    render("m2-studio-narrating", StudioWindowView(store: studio, installScript: nil, openReader: { _ in }), size: mac, scale: 2)
+    let emptyStudio = StudioStore(support: makeRoot("studio-empty", books: []))
+    emptyStudio.previewState(render: nil, queue: [], phoneLastSeen: nil, xteink: .looking, server: "192.168.1.20:8787")
+    render("m3-studio-empty", StudioWindowView(store: emptyStudio, installScript: URL(fileURLWithPath: "/tmp/install.sh"), openReader: { _ in }), size: mac, scale: 2)
+
+    let spread = ReaderModel(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: 14, style: ReaderStyle(), columns: 2)
+    spread.setPageSize(CGSize(width: (mac.width - 112 - 96) / 2, height: mac.height - 108 - 22))
+    spread.follow(chapter: audioChapter, sentence: 14)
+    render("m4-mac-reader", ReaderView(model: spread, player: player, onClose: {}), size: mac, scale: 2)
+}
+
+MainActor.assumeIsolated { run() }

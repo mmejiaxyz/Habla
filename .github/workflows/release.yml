@@ -1,0 +1,54 @@
+# Every push to main builds both apps and publishes a release "build-N".
+#  - Habla Studio (Mac) finds it, downloads it, and installs it when you restart or quit.
+#  - Habla (iPhone) shows "Update in AltStore"; AltStore installs it from altstore.json.
+name: Release
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "Design/**", "Docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode*.app | grep -v -i beta | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Test core
+        run: swift test --package-path Packages/HablaCore
+
+      - name: Build apps
+        run: Scripts/build.sh
+
+      - name: AltStore source
+        run: python3 Scripts/altstore-source.py "$BUILD_NUMBER" dist/Habla.ipa dist/altstore.json
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MSG=$(git log -1 --pretty=%s)
+          gh release create "build-$BUILD_NUMBER" \
+            dist/Habla-Studio.zip dist/Habla.ipa dist/altstore.json \
+            --title "Habla 1.$BUILD_NUMBER" \
+            --notes "$MSG" \
+            --target "$GITHUB_SHA" --latest
