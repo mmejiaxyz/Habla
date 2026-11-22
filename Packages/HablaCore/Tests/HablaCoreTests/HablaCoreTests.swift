@@ -639,6 +639,20 @@ final class XteinkTests: XCTestCase {
         }
         XCTAssertGreaterThan(m.chapters.filter { $0.audioStatus == .ready }.count, 0)
     }
+
+    /// A port held by another program (or a copy still quitting) never stops sharing.
+    func testServerFallsBackWhenPortIsTaken() async throws {
+        let root = Fixtures.tempDir()
+        let a = LibraryServer(library: root, progress: ProgressStore(fileURL: root.appendingPathComponent("a.json")))
+        let port = try await a.start(port: 0, advertise: false)
+        defer { a.stop() }
+        let b = LibraryServer(library: root, progress: ProgressStore(fileURL: root.appendingPathComponent("b.json")))
+        let other = try await b.start(port: port, advertise: false, retries: 1)
+        defer { b.stop() }
+        XCTAssertNotEqual(other, port)
+        let hello = try await SyncClient(baseURL: URL(string: "http://127.0.0.1:\(other)")!).hello()
+        XCTAssertEqual(hello.version, String(SyncProtocol.version))
+    }
 }
 
 final class Locked<T>: @unchecked Sendable {

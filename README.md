@@ -11,7 +11,7 @@ Scripts/build.sh          # → dist/Habla.app (Mac) and dist/Habla.ipa (iPhone)
 
 1. **Mac** — open Habla (move it to Applications so it can update itself). First run: click
    **Install** in the banner (Kokoro voice engine, ~350 MB, once). Drop EPUB files on the window;
-   narration starts by itself (~5× real time on an M3 Pro). Habla opens at login and keeps working
+   narration starts by itself (~13× real time on an M3 Pro, using the fast int8 Kokoro model and two workers). Habla opens at login and keeps working
    with its window closed: it serves the iPhone, imports books the iPhone sends, and narrates them.
    The Mac stays awake while narrating. *Habla → Open at Login* turns that off.
 2. **iPhone** — install `Habla.ipa` with AltStore. Open it on the same Wi-Fi: it finds the Mac by

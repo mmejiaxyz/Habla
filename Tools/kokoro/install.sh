@@ -49,7 +49,7 @@ rm -rf "$UV_CACHE_DIR"
 
 if [[ -z "${HABLA_SKIP_MODELS:-}" ]]; then
   base="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
-  for f in kokoro-v1.0.onnx voices-v1.0.bin; do
+  for f in kokoro-v1.0.int8.onnx voices-v1.0.bin; do
     if [[ ! -s "models/$f" ]]; then
       echo "STEP Downloading the voice ($f)…"
       curl -fsSL --retry 3 -C - -o "models/$f.part" "$base/$f" && mv "models/$f.part" "models/$f"

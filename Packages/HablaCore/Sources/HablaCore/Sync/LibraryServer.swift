@@ -43,9 +43,24 @@ public final class LibraryServer: @unchecked Sendable {
         self.accessToken = accessToken
     }
 
-    /// Starts listening (preferred port, or any free port if taken). Returns the bound port.
+    /// Starts listening on the preferred port; while it's taken (often a previous copy still
+    /// quitting) it retries for a few seconds, then takes any free port. iPhones find the Mac by
+    /// Bonjour name and library id, so a different port still works. Returns the bound port.
     @discardableResult
-    public func start(port preferred: UInt16 = SyncProtocol.defaultPort, advertise: Bool = true) async throws -> UInt16 {
+    public func start(port preferred: UInt16 = SyncProtocol.defaultPort, advertise: Bool = true,
+                      retries: Int = 8) async throws -> UInt16 {
+        var attempt = 0
+        while true {
+            do { return try await listen(on: preferred, advertise: advertise) }
+            catch let NWError.posix(code) where code == .EADDRINUSE {
+                attempt += 1
+                if attempt > retries { return try await listen(on: 0, advertise: advertise) }
+                try? await Task.sleep(nanoseconds: 750_000_000)
+            }
+        }
+    }
+
+    private func listen(on port: UInt16, advertise: Bool) async throws -> UInt16 {
         let params: NWParameters
         if let id = tlsIdentity, let secID = sec_identity_create(id) {
             let tls = NWProtocolTLS.Options()
@@ -56,12 +71,8 @@ public final class LibraryServer: @unchecked Sendable {
             params = NWParameters.tcp
         }
         params.allowLocalEndpointReuse = true
-        let listener: NWListener
-        if let l = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: preferred)!) {
-            listener = l
-        } else {
-            listener = try NWListener(using: params)
-        }
+        let listener = port == 0 ? try NWListener(using: params)
+                                 : try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         if advertise {
             var txt = NWTXTRecord()
             txt["v"] = "2"
@@ -70,7 +81,6 @@ public final class LibraryServer: @unchecked Sendable {
             listener.service = NWListener.Service(name: serviceName, type: SyncProtocol.bonjourType, domain: nil, txtRecord: txt)
         }
         listener.newConnectionHandler = { [weak self] conn in self?.handle(conn) }
-        self.listener = listener
 
         return try await withCheckedThrowingContinuation { cont in
             let once = Once()
@@ -78,11 +88,13 @@ public final class LibraryServer: @unchecked Sendable {
                 switch state {
                 case .ready:
                     guard once.claim() else { return }
-                    let p = listener.port?.rawValue ?? preferred
+                    self?.listener = listener
+                    let p = listener.port?.rawValue ?? port
                     self?.port = p
                     cont.resume(returning: p)
-                case .failed(let e):
+                case .failed(let e), .waiting(let e):
                     guard once.claim() else { return }
+                    listener.cancel()
                     cont.resume(throwing: e)
                 default: break
                 }

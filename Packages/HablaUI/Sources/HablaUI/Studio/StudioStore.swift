@@ -210,9 +210,7 @@ public final class StudioStore: ObservableObject {
         Task {
             do {
                 let port = try await server.start()
-                if port != SyncProtocol.defaultPort {
-                    alert = "Another copy of Habla (or `habla serve`) is already sharing on this Mac. This window shares on port \(port) instead — quit the other copy to avoid confusion."
-                }
+                // Another program kept the usual port: still works (iPhones find this Mac by name).
                 refreshAddress()
             } catch {
                 alert = "Couldn't start sharing on Wi-Fi: \(error.localizedDescription)"
@@ -537,8 +535,36 @@ public final class StudioStore: ObservableObject {
             let ok = (try? p.run()) != nil && { p.waitUntilExit(); return p.terminationStatus == 0 }()
             await MainActor.run {
                 self.kokoro = ok ? .ready : .failed("The voice engine is installed but doesn't start. Install it again.")
-                if ok { self.pump() }
+                if ok { self.pump(); self.upgradeToFastModel() }
             }
+        }
+    }
+
+    /// Installs made before the switch have only the full model: fetch the fast one quietly.
+    /// Narration switches over at the next book (or next launch); the full model is then removed.
+    private var upgrading = false
+    func upgradeToFastModel() {
+        let models = kokoroDirectory.appendingPathComponent("models", isDirectory: true)
+        let fast = models.appendingPathComponent(KokoroEngine.Configuration.fastModel)
+        let full = models.appendingPathComponent(KokoroEngine.Configuration.fullModel)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: fast.path) {
+            if fm.fileExists(atPath: full.path), render == nil { try? fm.removeItem(at: full) }
+            return
+        }
+        guard !upgrading else { return }
+        upgrading = true
+        Task {
+            defer { upgrading = false }
+            let url = URL(string: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/\(KokoroEngine.Configuration.fastModel)")!
+            guard let (tmp, resp) = try? await URLSession.shared.download(from: url),
+                  (resp as? HTTPURLResponse)?.statusCode == 200,
+                  ((try? fm.attributesOfItem(atPath: tmp.path)[.size] as? Int) ?? 0) > 50_000_000 else { return }
+            try? fm.removeItem(at: fast)
+            guard (try? fm.moveItem(at: tmp, to: fast)) != nil else { return }
+            // New workers pick the fast model; the running ones finish their current book.
+            if render == nil, let old = engine { engine = nil; await old.shutdown() }
+            if render == nil { try? fm.removeItem(at: full) }
         }
     }
 

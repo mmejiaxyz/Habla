@@ -19,12 +19,18 @@ public actor KokoroEngine: TTSEngine {
             self.python = python; self.worker = worker; self.model = model; self.voicesFile = voicesFile
         }
 
-        /// Layout produced by `Tools/kokoro/setup.sh`.
+        /// The quantized model: about twice as fast on the CPU, a third of the size.
+        public static let fastModel = "kokoro-v1.0.int8.onnx"
+        public static let fullModel = "kokoro-v1.0.onnx"
+
+        /// Layout produced by `Tools/kokoro/install.sh`. Uses the fast model when it's there.
         public init(toolsDirectory dir: URL) {
+            let models = dir.appendingPathComponent("models", isDirectory: true)
+            let fast = models.appendingPathComponent(Self.fastModel)
             self.init(python: dir.appendingPathComponent(".venv/bin/python"),
                       worker: dir.appendingPathComponent("kokoro_worker.py"),
-                      model: dir.appendingPathComponent("models/kokoro-v1.0.onnx"),
-                      voicesFile: dir.appendingPathComponent("models/voices-v1.0.bin"))
+                      model: FileManager.default.fileExists(atPath: fast.path) ? fast : models.appendingPathComponent(Self.fullModel),
+                      voicesFile: models.appendingPathComponent("voices-v1.0.bin"))
         }
     }
 

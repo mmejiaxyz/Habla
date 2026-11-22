@@ -248,7 +248,7 @@ public struct StudioWindowView: View {
                     Text("Checking the voice engine…").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                 default:
                     Text("Install the voice engine to narrate books").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
-                    Text("Kokoro runs on this Mac, free and offline. One download of about 570 MB — nothing else to install.")
+                    Text("Kokoro runs on this Mac, free and offline. One download of about 350 MB — nothing else to install.")
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.65))
                 }
             }

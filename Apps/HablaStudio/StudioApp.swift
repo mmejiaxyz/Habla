@@ -8,6 +8,13 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // One Habla per Mac: quit any other running copy (e.g. "Habla Studio" from before the
+        // rename, started by its old login item) so they don't fight over the sharing port.
+        let me = NSRunningApplication.current
+        for other in NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+        where other.processIdentifier != me.processIdentifier {
+            other.terminate()
+        }
         // On by default; re-registered each launch so it follows the app if it moves or is renamed.
         if UserDefaults.standard.object(forKey: "habla.openAtLogin") as? Bool ?? true {
             try? SMAppService.mainApp.register()
