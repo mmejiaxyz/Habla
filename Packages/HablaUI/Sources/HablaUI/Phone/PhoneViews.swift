@@ -559,7 +559,6 @@ public struct PhoneBookView: View {
             Theme.screen.ignoresSafeArea()
             if let b = book {
                 Scroll { content(b) }
-                    .background(alignment: .top) { Theme.accent.frame(height: 420).ignoresSafeArea(edges: .top) }
             }
         }
         .onChange(of: book == nil) { _, gone in if gone { close() } }
@@ -603,7 +602,9 @@ public struct PhoneBookView: View {
                     .padding(.top, 22).padding(.bottom, 34)
             }
             .frame(maxWidth: .infinity)
-            .background(Theme.accent)
+            // The band ends with the cover field (the title sits on paper, however long it is);
+            // it only reaches upward, behind the status bar and when the page is pulled down.
+            .background(Theme.accent.padding(.top, -1000))
 
             // Title
             VStack(spacing: 10) {
