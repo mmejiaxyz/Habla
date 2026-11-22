@@ -2,7 +2,7 @@
 """Writes the AltStore source for a release: altstore-source.py <build> <ipa> <out.json>."""
 import datetime, json, os, sys
 
-REPO = "pulpt37/Habla"
+REPO = "mmejiaxyz/Habla"
 build, ipa, out = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 version = f"1.{build}"
 url = f"https://github.com/{REPO}/releases/download/build-{build}/Habla.ipa"

@@ -31,7 +31,7 @@ release `build-N` with `Habla-Studio.zip`, `Habla.ipa` and `altstore.json`.
 - **Mac:** Studio checks GitHub every few hours, downloads new builds in the background and shows
   *Restart*; otherwise it installs when you quit. *Habla Studio → Check for Updates…* checks now.
 - **iPhone:** in AltStore, add this source once (Browse → Sources → ＋):
-  `https://github.com/pulpt37/Habla/releases/latest/download/altstore.json`.
+  `https://github.com/mmejiaxyz/Habla/releases/latest/download/altstore.json`.
   AltStore then shows and installs updates; Habla also shows *Update in AltStore* when one exists.
 
 The Xteink (CrossPoint) support is built but hidden until it's tested on the device

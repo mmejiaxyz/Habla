@@ -3,7 +3,7 @@ import Foundation
 /// Updates published by GitHub Actions: every push to `main` becomes a release tagged
 /// `build-N` carrying `Habla-Studio.zip` (Mac), `Habla.ipa` (iPhone) and `altstore.json`.
 public struct AppUpdate: Equatable, Sendable {
-    public static let repository = "pulpt37/Habla"
+    public static let repository = "mmejiaxyz/Habla"
     /// AltStore source: always points at the newest release.
     public static let altStoreSource = URL(string: "https://github.com/\(repository)/releases/latest/download/altstore.json")!
     public static let releasesPage = URL(string: "https://github.com/\(repository)/releases/latest")!

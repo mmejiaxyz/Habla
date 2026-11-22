@@ -472,8 +472,8 @@ final class XteinkTests: XCTestCase {
     func testAppUpdateParsesGitHubRelease() {
         let json = """
         {"tag_name":"build-12","name":"Habla 1.12","body":"Fix reader","draft":false,"prerelease":false,
-         "assets":[{"name":"Habla.ipa","browser_download_url":"https://github.com/pulpt37/Habla/releases/download/build-12/Habla.ipa"},
-                   {"name":"Habla-Studio.zip","browser_download_url":"https://github.com/pulpt37/Habla/releases/download/build-12/Habla-Studio.zip"}]}
+         "assets":[{"name":"Habla.ipa","browser_download_url":"https://github.com/mmejiaxyz/Habla/releases/download/build-12/Habla.ipa"},
+                   {"name":"Habla-Studio.zip","browser_download_url":"https://github.com/mmejiaxyz/Habla/releases/download/build-12/Habla-Studio.zip"}]}
         """
         let u = AppUpdate.parse(Data(json.utf8))
         XCTAssertEqual(u?.build, 12)
