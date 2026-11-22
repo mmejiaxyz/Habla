@@ -78,6 +78,67 @@ enum Fixtures {
         return url
     }
 
+    /// The ways real publishers print chapter titles: an image under a `chapter-title`
+    /// paragraph, a real heading that already says the name, a title-only part page, and a
+    /// `chapter-title` paragraph of text.
+    static func chapterTitlesEPUB() -> Data {
+        let files: [(String, String)] = [
+            ("OEBPS/ch1.xhtml", xhtml("""
+                <section><p class="chapter-title"><img alt="Chapter One" src="ch1.png"/></p>
+                <p>It was a dark and stormy night in the small town.</p></section>
+                """)),
+            ("OEBPS/ch2.xhtml", xhtml("""
+                <section><h2>Chapter Two</h2>
+                <p>The next morning, the storm had passed.</p></section>
+                """)),
+            ("OEBPS/ch3.xhtml", xhtml("<h1>Book Two</h1>")),
+            ("OEBPS/ch4.xhtml", xhtml("""
+                <section><p class="chapter-title">Chapter Four</p>
+                <p>After the part page, the story continued.</p></section>
+                """)),
+            ("OEBPS/nav.xhtml", xhtml("""
+                <nav epub:type="toc"><ol>
+                <li><a href="ch1.xhtml">Chapter One</a></li>
+                <li><a href="ch2.xhtml">Chapter Two</a></li>
+                <li><a href="ch3.xhtml">Book Two</a></li>
+                <li><a href="ch4.xhtml">Chapter Four</a></li>
+                </ol></nav>
+                """)),
+        ]
+        let opf = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:title>Chapter Titles</dc:title><dc:creator>Test</dc:creator><dc:language>en</dc:language>
+          </metadata>
+          <manifest>
+            <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+            <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c3" href="ch3.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c4" href="ch4.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine><itemref idref="c1"/><itemref idref="c2"/><itemref idref="c3"/><itemref idref="c4"/></spine>
+        </package>
+        """
+        let container = """
+        <?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+        <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>
+        """
+        var zip = ZipWriter()
+        zip.add("mimetype", data: Data("application/epub+zip".utf8))
+        zip.add("META-INF/container.xml", data: Data(container.utf8))
+        zip.add("OEBPS/content.opf", data: Data(opf.utf8))
+        for (path, content) in files { zip.add(path, data: Data(content.utf8)) }
+        return zip.finalize()
+    }
+
+    static func writeChapterTitlesEPUB(to dir: URL) -> URL {
+        let url = dir.appendingPathComponent("chapter-titles.epub")
+        try! chapterTitlesEPUB().write(to: url)
+        return url
+    }
+
     /// A custom EPUB: chapters as (file name, raw bytes), a nav TOC listing `toc` files.
     static func customEPUB(title: String = "Custom", chapters: [(String, Data)], toc: [String], language: String? = "en") -> Data {
         let items = chapters.enumerated().map { i, c in "<item id=\"c\(i)\" href=\"\(c.0)\" media-type=\"application/xhtml+xml\"/>" }.joined()

@@ -14,6 +14,10 @@ final class LanguageTests: XCTestCase {
                          "Никто не знал, кто придёт первым. Девочка по имени Маша смотрела в окно и думала о далёком городе, где поезда никогда не останавливались."]),
         ("uk", "ru", ["Був тихий ранок у селі. Іван Петрович відчинив крамницю о восьмій годині, тобто раніше, ніж звичайно.",
                       "Ніхто не знав, хто прийде першим. Дівчинка на ім'я Марійка дивилася у вікно й думала про далеке місто, де потяги ніколи не зупинялися."]),
+        ("fr", "fr", ["C'était un matin tranquille au village. Monsieur Lefèvre ouvrit la boutique à huit heures, plus tôt que d'habitude.",
+                      "Personne ne savait qui viendrait en premier. La jeune fille à la fenêtre regardait la route et pensait à la ville lointaine, où les trains ne s'arrêtaient jamais."]),
+        ("hi", "hi", ["गाँव में एक शांत सुबह थी। श्री शर्मा ने दुकान आठ बजे खोली, हमेशा से पहले।",
+                      "किसी को नहीं पता था कि पहले कौन आएगा। खिड़की के पास बैठी लड़की सड़क देखती रही और दूर के शहर के बारे में सोचती रही, जहाँ रेलगाड़ियाँ कभी नहीं रुकती थीं।"]),
     ]
 
     static func epub(_ sample: (code: String, declared: String?, paragraphs: [String])) -> Data {
@@ -28,7 +32,8 @@ final class LanguageTests: XCTestCase {
 
     func testEachLanguageImportsReadableAndNarratesOnlyWithAVoice() throws {
         let root = Fixtures.tempDir()
-        let expectedChapter = ["en": "Chapter", "es": "Capítulo", "de": "Kapitel", "ru": "Глава", "uk": "Розділ"]
+        let expectedChapter = ["en": "Chapter", "es": "Capítulo", "de": "Kapitel", "ru": "Глава", "uk": "Розділ",
+                               "fr": "Chapter", "hi": "Chapter"]   // French/Hindi keep the English word: no voice for them
         for sample in Self.samples {
             let url = Fixtures.write(Self.epub(sample), named: "\(sample.code).epub", in: root)
             let bundle = try BookImporter().importEPUB(at: url, into: root.appendingPathComponent("lib"))
@@ -65,8 +70,13 @@ final class LanguageTests: XCTestCase {
         XCTAssertEqual(BookLanguage.closestVoice(to: "af_bella", for: "en"), "af_heart", "a Kokoro-only voice maps to the nearest one")
         XCTAssertEqual(BookLanguage.closestVoice(to: "bm_george", for: "en"), "bm_fable")
         XCTAssertEqual(BookLanguage.closestVoice(to: "ef_dora", for: "es"), "em_alex")
-        XCTAssertTrue(BookLanguage.hasVoice("fr") && BookLanguage.hasVoice("hi"))
+        XCTAssertFalse(BookLanguage.hasVoice("fr") || BookLanguage.hasVoice("hi"))
         XCTAssertFalse(BookLanguage.hasVoice("de") || BookLanguage.hasVoice("ru") || BookLanguage.hasVoice("uk"))
+        // Languages without a voice fall back to the English voices (the old voice ids still map
+        // somewhere); narration and voice pickers must check hasVoice, never rely on this fallback.
+        XCTAssertEqual(BookLanguage.voices(for: "fr"), BookLanguage.voices(for: "en"))
+        XCTAssertFalse(BookLanguage.voice("ff_siwis", speaks: "fr"), "retired voices are not offered")
+        XCTAssertFalse(BookLanguage.voice("hf_alpha", speaks: "hi"))
         XCTAssertFalse(BookLanguage.voice("af_heart", speaks: "es"))
         XCTAssertTrue(BookLanguage.voice("em_alex", speaks: "es"))
         XCTAssertEqual(BookLanguage.name("de"), "German")

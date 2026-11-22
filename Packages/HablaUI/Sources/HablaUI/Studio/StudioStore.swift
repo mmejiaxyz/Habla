@@ -404,8 +404,9 @@ public final class StudioStore: ObservableObject {
 
     /// Queues a book. `unpause`: the user asked for narration now (the default).
     public func narrate(_ id: String, unpause: Bool = true) {
-        // No voice for this language (German, Russian, Ukrainian): the book stays text-only.
-        if let m = books.first(where: { $0.id == id }), !m.canNarrate { return }
+        // No voice for this language (German, Russian, Ukrainian, French, Hindi): the book stays
+        // text-only. Unknown ids are refused too, so nothing can reach the queue un-checked.
+        guard let m = books.first(where: { $0.id == id }), m.canNarrate else { return }
         var s = stopped; s.remove(id); stopped = s
         if !queue.contains(id) { queue.append(id) }
         if unpause { paused = false }
@@ -435,7 +436,9 @@ public final class StudioStore: ObservableObject {
 
     private func resumeUnfinished() {
         let skip = stopped
-        for m in books where m.voice != nil && !m.chaptersToNarrate(voiceID: voice(for: m)).isEmpty
+        // Only languages with a voice may be narrated: a French/Hindi/German book narrated in an
+        // earlier version must keep playing its existing audio, never be re-narrated in English.
+        for m in books where m.canNarrate && m.voice != nil && !m.chaptersToNarrate(voiceID: voice(for: m)).isEmpty
                                 && !queue.contains(m.id) && !skip.contains(m.id) {
             queue.append(m.id)
         }

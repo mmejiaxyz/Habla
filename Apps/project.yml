@@ -7,6 +7,9 @@ options:
 packages:
   HablaUI:
     path: ../Packages/HablaUI
+  # Paradee on the iPhone (needs Scripts/fetch-paradee.sh first; only the iPhone app links it).
+  ParadeeKit:
+    path: ../Packages/ParadeeKit
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -19,6 +22,7 @@ targets:
     sources: [Habla]
     dependencies:
       - package: HablaUI
+      - package: ParadeeKit
     info:
       path: Habla/Info.plist
       properties:

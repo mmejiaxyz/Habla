@@ -4,11 +4,10 @@ import NaturalLanguage
 /// The languages Habla reads, and which of them Paradee can narrate.
 ///
 /// Reading works for all of them (text, layout, hyphenation, Find, dictionary, translate).
-/// Narration needs a Paradee voice: English, Spanish, French and Hindi have one. Other
-/// languages (German, Russian, Ukrainian…) are read-only instead of being read with the wrong
-/// accent.
+/// Narration needs a Paradee voice: English and Spanish have one. Other languages (German,
+/// Russian, Ukrainian, French, Hindi…) are read-only instead of being read with the wrong accent.
 public enum BookLanguage {
-    public static let supported = ["en", "es", "fr", "de", "ru", "uk", "hi"]
+    public static let supported = ["en", "es", "de", "ru", "uk"]
 
     /// "en-US" → "en", "ukr" → "uk", "spa" → "es", "deu"/"ger" → "de", "rus" → "ru".
     public static func normalize(_ code: String?) -> String? {
@@ -39,14 +38,14 @@ public enum BookLanguage {
     }
 
     /// Paradee has a voice for this language.
-    public static func hasVoice(_ lang: String) -> Bool { ["en", "es", "fr", "hi"].contains(normalize(lang) ?? lang) }
+    public static func hasVoice(_ lang: String) -> Bool { ["en", "es"].contains(normalize(lang) ?? lang) }
 
-    /// Voices offered for a book in this language (first is the default).
+    /// Voices offered for a book in this language (first is the default). Languages without a voice
+    /// fall back to the English voices, so old voice ids still map somewhere — everything that starts
+    /// narration or offers a voice picker must check `hasVoice` first.
     public static func voices(for lang: String) -> [String] {
         switch normalize(lang) {
         case "es": return ["em_alex"]
-        case "fr": return ["ff_siwis"]
-        case "hi": return ["hf_alpha", "hm_omega"]
         default: return ["af_heart", "am_puck", "bf_isabella", "bm_fable"]
         }
     }
@@ -71,7 +70,6 @@ public enum BookLanguage {
         case "de": return "Kapitel"
         case "ru": return "Глава"
         case "uk": return "Розділ"
-        case "fr": return "Chapitre"
         default: return "Chapter"
         }
     }

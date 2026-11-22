@@ -28,8 +28,8 @@ Scripts/build.sh          # → dist/Habla.app (Mac) and dist/Habla.ipa (iPhone)
 Books in **English, Spanish, German, Russian, Ukrainian** (and French, Hindi) read fully: layout and
 hyphenation follow the book's language (detected from the text, even when the EPUB says otherwise),
 and Find, the dictionary and translation work in all of them. **Narration** uses Paradee's voices:
-English (Heart, Puck, Isabella, Fable), Spanish (Alex), French (Siwis) and Hindi (Alpha, Omega).
-Books in other languages (German, Russian, Ukrainian…) are read-only.
+English (Heart, Puck, Isabella, Fable) and Spanish (Alex).
+Books in other languages (German, Russian, Ukrainian, French, Hindi…) are read-only.
 
 ## Updates
 

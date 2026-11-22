@@ -33,12 +33,14 @@ public struct ReadingPosition: Codable, Hashable, Sendable {
 
 public extension BookManifest {
     /// Fraction of the book's words before a position (front matter excluded).
+    /// Negative sentence ids (the spoken title and the chapter-end silence) are before the
+    /// first real sentence, so they count as the start of their chapter.
     func fraction(chapter: Int, sentence: Int) -> Double {
         let body = chapters.filter { !$0.isFrontMatter }
         let total = body.reduce(0) { $0 + $1.sentenceCount }
         guard total > 0 else { return 0 }
         let before = body.filter { $0.index < chapter }.reduce(0) { $0 + $1.sentenceCount }
-        let inChapter = body.contains { $0.index == chapter } ? sentence : 0
+        let inChapter = body.contains { $0.index == chapter } ? max(0, sentence) : 0
         return min(1, Double(before + inChapter) / Double(total))
     }
 }

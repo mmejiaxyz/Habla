@@ -32,6 +32,12 @@ public final class RenderPipeline: @unchecked Sendable {
     }
     public var pauses = Pauses()
 
+    /// Sentence id of the spoken title that opens a chapter whose text doesn't say its name.
+    /// Outside the real ids (0..<sentenceCount) and negative, so positions count it as "start of
+    /// the chapter", fractions clamp, and nothing highlights or collides. (The audible break
+    /// between chapters is played by the player, so existing audio never needs re-rendering.)
+    public static let titleSentenceID = -1
+
     public init(engine: TTSEngine, cacheDirectory: URL) {
         self.engine = engine
         self.cacheDirectory = cacheDirectory
@@ -59,7 +65,19 @@ public final class RenderPipeline: @unchecked Sendable {
         for (n, info) in todo.enumerated() {
             try Task.checkCancellation()
             let text = try bundle.chapterText(info)
-            let plan = plan(text)
+            // Already narrated with this voice, only an older plan: re-render just when the new
+            // plan changes what is said (a missing spoken title). Otherwise stamp it and move on,
+            // so the iPhone never re-downloads audio that is identical.
+            if info.audioStatus == .ready, (info.voiceID ?? manifest.voice?.voiceID) == voice.voiceID,
+               !titleChangesAudio(text, language: manifest.language) {
+                manifest = try bundle.manifest()
+                if let i = manifest.chapters.firstIndex(where: { $0.index == info.index }) {
+                    manifest.chapters[i].planVersion = BookManifest.currentPlanVersion
+                    manifest = try bundle.commit(manifest)
+                }
+                continue
+            }
+            let plan = plan(text, language: manifest.language)
             let audioPath = BookBundle.audioPath(info.index)
             let timingPath = BookBundle.timingPath(info.index)
             guard FileManager.default.fileExists(atPath: bundle.url.path) else { throw CancellationError() }
@@ -111,6 +129,7 @@ public final class RenderPipeline: @unchecked Sendable {
                 manifest.chapters[i].audioStatus = .ready
                 manifest.chapters[i].voiceID = voice.voiceID
                 manifest.chapters[i].model = engine.modelDescription
+                manifest.chapters[i].planVersion = BookManifest.currentPlanVersion
             }
             manifest = try bundle.commit(manifest)
             pruneCache()
@@ -167,30 +186,115 @@ public final class RenderPipeline: @unchecked Sendable {
 
     struct PlannedSentence { var id: Int; var spoken: String; var pause: TimeInterval }
 
-    func plan(_ chapter: ChapterText) -> [PlannedSentence] {
+    /// How a chapter's name gets said. `announce`: the text never prints it, so a title sentence
+    /// is added. `speaksPartOfName`: it prints only part ("One" for "Chapter One"), so that line
+    /// says the whole name. Either changes the audio of a chapter narrated before titles existed.
+    struct TitlePlan {
+        var spokenTitle: String
+        var titleWords: [String]
+        var markerBlocks: [Int]
+        var announce: Bool
+        var speaksPartOfName: Bool
+        var changesAudio: Bool { announce || speaksPartOfName }
+    }
+
+    func titleChangesAudio(_ chapter: ChapterText, language: String) -> Bool {
+        titlePlan(chapter, language: language).changesAudio
+    }
+
+    func titlePlan(_ chapter: ChapterText, language: String) -> TitlePlan {
+        var normalizer = SpeechNormalizer()
+        normalizer.language = language
+        let spokenTitle = normalizer.spoken(chapter.title, isHeading: true)
+        let titleWords = Self.words(spokenTitle)
+
+        // The leading blocks that print the chapter's name (headings, or a styled paragraph
+        // like a big "1" above "BEA"), in spoken form. Blocks whose words aren't part of the
+        // title are the start of the story and end the run.
+        var markerBlocks: [Int] = []
+        var markerWords: [String] = []
+        for (i, block) in chapter.blocks.enumerated() where block.kind != .sceneBreak && !block.sentences.isEmpty {
+            let spoken = block.sentences.map { $0.spoken ?? block.substring($0.range) }.joined(separator: " ")
+            let words = Self.words(spoken)
+            guard !words.isEmpty, words.isSubsequence(of: titleWords) else { break }
+            markerBlocks.append(i)
+            markerWords += words
+        }
+        let saysName = !markerWords.isEmpty && (markerWords == titleWords || titleWords.isSubsequence(of: markerWords))
+        // The printed title says only part of the name ("One" for "Chapter One"): the first
+        // marker speaks the whole name, the rest go silent so nothing is said twice.
+        let speaksPartOfName = !saysName && !markerWords.isEmpty && markerWords.isSubsequence(of: titleWords)
+        let announce = !titleWords.isEmpty && !saysName && !speaksPartOfName
+            && Self.isMeaningfulTitle(chapter.title)
+        return TitlePlan(spokenTitle: spokenTitle, titleWords: titleWords, markerBlocks: markerBlocks,
+                         announce: announce, speaksPartOfName: speaksPartOfName)
+    }
+
+    /// The narration for one chapter: its name (announced when the text doesn't already say
+    /// it), then every sentence in order. Some books style the title as a
+    /// `<p class="chapter-title">`, put it in an image, or only in the TOC — those get a
+    /// synthetic title sentence from the manifest name.
+    func plan(_ chapter: ChapterText, language: String) -> [PlannedSentence] {
+        let t = titlePlan(chapter, language: language)
+        let (spokenTitle, titleWords, markerBlocks) = (t.spokenTitle, t.titleWords, t.markerBlocks)
+        let (announce, speaksPartOfName) = (t.announce, t.speaksPartOfName)
+        // A title styled as a plain paragraph (p/div with the chapter's name) is the printed
+        // title too: give it the heading pause so it reads like an announcement, not a line.
+        var styledTitleIndex: Int?
+        if let fi = chapter.blocks.firstIndex(where: { $0.kind != .sceneBreak && !$0.sentences.isEmpty }) {
+            let block = chapter.blocks[fi]
+            let words = Self.words(block.sentences.map { $0.spoken ?? block.substring($0.range) }.joined(separator: " "))
+            if block.kind != .heading, words == titleWords { styledTitleIndex = fi }
+        }
+
         var out: [PlannedSentence] = []
-        for block in chapter.blocks {
+        var titleSpoken = false
+        for (bi, block) in chapter.blocks.enumerated() {
             if block.kind == .sceneBreak {
                 if !out.isEmpty { out[out.count - 1].pause = max(out[out.count - 1].pause, pauses.sceneBreak) }
                 continue
             }
+            let inMarker = markerBlocks.contains(bi)
             for (j, s) in block.sentences.enumerated() {
                 var spoken = s.spoken ?? block.substring(s.range)
                 // Nothing to say (only emoji or symbols): keep the sentence as a short silence, so
                 // every sentence has a timing and highlights/seeking stay aligned with the text.
                 if !spoken.contains(where: { $0.isLetter || $0.isNumber }) { spoken = "" }
+                var pause: TimeInterval
                 let last = j == block.sentences.count - 1
-                let pause: TimeInterval
                 switch (last, block.kind) {
                 case (false, _): pause = pauses.sentence
                 case (true, .heading): pause = pauses.heading
                 case (true, .listItem): pause = pauses.listItem
                 default: pause = pauses.paragraph
                 }
+                if inMarker, speaksPartOfName {
+                    if !titleSpoken { spoken = spokenTitle; titleSpoken = true; pause = pauses.heading }
+                    else { spoken = "" }
+                }
+                if styledTitleIndex == bi, last { pause = pauses.heading }
                 out.append(PlannedSentence(id: s.id, spoken: spoken, pause: pause))
             }
         }
+        if announce {
+            out.insert(PlannedSentence(id: Self.titleSentenceID, spoken: spokenTitle, pause: pauses.heading), at: 0)
+        }
         return out
+    }
+
+    /// Word forms for loose comparison ("Chapter One:" ≈ "CHAPTER ONE" ≈ "Chapter 1.").
+    static func words(_ s: String) -> [String] {
+        s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    }
+
+    /// Titles worth announcing ("Chapter One" yes; "Front matter", "Untitled" and bare file
+    /// names no).
+    static func isMeaningfulTitle(_ title: String) -> Bool {
+        let core = words(title).joined(separator: " ")
+        guard !core.isEmpty, !["untitled", "front matter", "cover"].contains(core) else { return false }
+        // Sloppy TOC entries that are just file names ("chapter1.xhtml") name nothing.
+        let lower = title.lowercased()
+        return !lower.hasSuffix(".xhtml") && !lower.hasSuffix(".html") && !lower.hasSuffix(".htm")
     }
 
     // MARK: - Sentence cache
@@ -222,5 +326,19 @@ public final class RenderPipeline: @unchecked Sendable {
         ints.withUnsafeBufferPointer { data.append(UnsafeBufferPointer(start: $0.baseAddress, count: $0.count)) }
         try? data.write(to: file, options: .atomic)   // the cache is best-effort; the audio is what matters
         return (audio, false)
+    }
+}
+
+extension Array where Element == String {
+    /// Whether these words appear in order (not necessarily adjacent) in `other`:
+    /// "one" is part of "chapter one", "chapter one" is part of "chapter one: six maidens".
+    func isSubsequence(of other: [String]) -> Bool {
+        guard !isEmpty else { return true }
+        var i = 0
+        for word in other where word == self[i] {
+            i += 1
+            if i == count { return true }
+        }
+        return false
     }
 }

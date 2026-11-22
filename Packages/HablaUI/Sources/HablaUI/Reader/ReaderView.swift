@@ -372,6 +372,15 @@ public struct ReaderView: View {
                 }
                 #endif
                 HStack(spacing: 10) {
+                    // First button: resume listening from the tapped sentence (only when
+                    // this chapter is narrated — never a dead button).
+                    if let sid = model.narrationStart(at: (sel.sentence ?? sel.word).location) {
+                        cardButton("Listen from here", symbol: "play.fill") {
+                            player.jump(chapter: model.chapter, sentence: sid, autoplay: true,
+                                        in: model.bundle, manifest: model.manifest)
+                            withAnimation(.easeOut(duration: 0.15)) { selection = nil }
+                        }
+                    }
                     cardButton(existing == nil ? "Underline" : "Remove", symbol: existing == nil ? "underline" : "eraser") {
                         if let existing { model.removeUnderline(existing) } else if let r = selectedRange { model.addUnderline(r) }
                         withAnimation(.easeOut(duration: 0.15)) { selection = nil }

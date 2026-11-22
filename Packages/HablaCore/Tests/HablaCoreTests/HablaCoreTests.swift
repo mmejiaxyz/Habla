@@ -105,7 +105,8 @@ final class RenderTests: XCTestCase {
         let info = m.chapters[1]
         let timing = try XCTUnwrap(try bundle.timing(info))
         XCTAssertGreaterThan(timing.duration, 1)
-        XCTAssertEqual(timing.sentences.map(\.id), timing.sentences.map(\.id).sorted())
+        // Real sentence ids in order (an announced title, id -1, may open the chapter).
+        XCTAssertEqual(timing.sentences.map(\.id).filter { $0 >= 0 }, Array(0..<info.sentenceCount))
         for (a, b) in zip(timing.sentences, timing.sentences.dropFirst()) { XCTAssertLessThanOrEqual(a.end, b.start) }
         XCTAssertEqual(timing.sentence(at: timing.sentences[1].start + 0.01), timing.sentences[1].id)
         XCTAssertTrue(m.files.contains { $0.path == "audio/ch001.m4a" })
@@ -635,7 +636,10 @@ final class XteinkTests: XCTestCase {
         let m = try bundle.manifest()
         for info in m.chapters where info.audioStatus == .ready {
             let timing = try JSON.decoder.decode(ChapterTiming.self, from: Data(contentsOf: bundle.fileURL(info.timingFile!)))
-            XCTAssertEqual(timing.sentences.map(\.id), timing.sentences.map(\.id).sorted())
+            // Written in order: real sentences ascending (an announced spoken title may
+            // open with id -1).
+            let realIDs = timing.sentences.map(\.id).filter { $0 >= 0 }
+            XCTAssertEqual(realIDs, realIDs.sorted())
             XCTAssertEqual(timing.sentences.map(\.start), timing.sentences.map(\.start).sorted())
         }
         XCTAssertGreaterThan(m.chapters.filter { $0.audioStatus == .ready }.count, 0)

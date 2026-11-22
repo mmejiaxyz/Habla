@@ -41,6 +41,10 @@ public final class NarrationPlayer: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var lastSaved = Date.distantPast
     private var sleepTask: Task<Void, Never>?
+    /// The audible break between chapters: the next chapter starts after this silence.
+    /// Played here rather than rendered into the audio, so books narrated before it get it too.
+    public static var chapterBreak: TimeInterval = 1.5
+    private var breakTask: Task<Void, Never>?
     private var remoteConfigured = false
 
     public init() {}
@@ -144,6 +148,7 @@ public final class NarrationPlayer: ObservableObject {
     public func clearMessage() { message = nil }
 
     public func pause() {
+        breakTask?.cancel(); breakTask = nil
         player?.pause()
         isPlaying = false
         save(force: true)
@@ -174,10 +179,15 @@ public final class NarrationPlayer: ObservableObject {
         seek(to: duration * min(max(0, fraction), 1), player: player)
     }
 
-    /// Jump to a sentence (from the reader's "listen from here").
-    public func jump(chapter c: Int, sentence s: Int, autoplay: Bool = true) {
-        guard let manifest, let bundle else { return }
-        if c == chapter, let start = timing?.sentences.first(where: { $0.id == s })?.start, let player {
+    /// Jump to a sentence (from the reader's "listen from here"). The reader passes its book
+    /// when the player has another one loaded (or none); otherwise the loaded book is used.
+    public func jump(chapter c: Int, sentence s: Int, autoplay: Bool = true,
+                     in bundle: BookBundle? = nil, manifest: BookManifest? = nil) {
+        breakTask?.cancel(); breakTask = nil
+        let bundle = bundle ?? self.bundle
+        let manifest = manifest ?? self.manifest
+        guard let bundle, let manifest else { return }
+        if c == chapter, manifest.id == bookID, let start = timing?.sentences.first(where: { $0.id == s })?.start, let player {
             seek(to: start, player: player)
             sentence = s
             if autoplay { play() }
@@ -187,6 +197,7 @@ public final class NarrationPlayer: ObservableObject {
     }
 
     public func nextChapter() {
+        breakTask?.cancel(); breakTask = nil
         guard let n = nextReady() else { return }
         let playing = isPlaying
         openChapter(n, sentence: nil, time: 0)
@@ -230,6 +241,7 @@ public final class NarrationPlayer: ObservableObject {
 
     public func unload() {
         sleepTask?.cancel(); sleepTimer = nil
+        breakTask?.cancel(); breakTask = nil
         save(force: true)
         stopEngine()
         bookID = nil
@@ -266,8 +278,16 @@ public final class NarrationPlayer: ObservableObject {
             return
         }
         openChapter(next, sentence: nil, time: 0)
-        play()
         save(force: true)
+        // Still "playing" during the break, so the controls don't flicker to paused.
+        isPlaying = true
+        breakTask?.cancel()
+        breakTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.chapterBreak * 1_000_000_000))
+            guard !Task.isCancelled, let self, self.isPlaying else { return }
+            self.breakTask = nil
+            self.play()
+        }
     }
 
     private func nextReady() -> ChapterInfo? { manifest?.chapters.first { $0.index > chapter && $0.audioStatus == .ready } }

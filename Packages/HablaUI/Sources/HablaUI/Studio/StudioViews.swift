@@ -10,9 +10,13 @@ public struct StudioWindowView: View {
     @ObservedObject var updater: StudioUpdater
     var installScript: URL?
     var openReader: (String) -> Void
-    @State private var dropping = false
-    @State private var showImporter = false
-    @State private var confirmDelete: BookManifest?
+    @State var dropping = false
+    @State var showImporter = false
+    @State var confirmDelete: BookManifest?
+    /// Redesign: the book page is open (otherwise the cover grid).
+    @State var showingBook = false
+    /// Redesign: sidebar "Narrating" filter.
+    @State var narratingOnly = false
     @State private var confirmForget: PairedDevice?
 
     public init(store: StudioStore, updater: StudioUpdater = StudioUpdater(), installScript: URL?, openReader: @escaping (String) -> Void) {
@@ -20,16 +24,7 @@ public struct StudioWindowView: View {
     }
 
     public var body: some View {
-        HStack(spacing: 0) {
-            sidebar.frame(width: 320)
-            Rectangle().fill(Theme.hairline).frame(width: 0.5)
-            VStack(spacing: 0) {
-                if store.voiceEngine != .ready { voiceEngineBanner }
-                updateBanner
-                if let m = store.selected { detail(m) } else { emptyDetail }
-            }
-        }
-        .background(Theme.screen)
+        redesignedBody   // StudioHome.swift
         // Up/down arrows move through the library.
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
         .onKeyPress(.upArrow) { moveSelection(-1); return .handled }
@@ -423,7 +418,7 @@ public struct StudioWindowView: View {
 
     func voiceName(_ v: String) -> String { Imprint.voiceName(v) }
     func voiceNote(_ v: String) -> String {
-        let accent = v.hasPrefix("e") ? "Spanish" : v.hasPrefix("f") ? "French" : v.hasPrefix("h") ? "Hindi" : v.hasPrefix("b") ? "British" : "American"
+        let accent = v.hasPrefix("e") ? "Spanish" : v.hasPrefix("b") ? "British" : "American"
         let gender = v.dropFirst().first == "m" ? "male" : "female"
         return "\(accent) · \(gender)\(v == "af_heart" ? " · recommended" : "")"
     }

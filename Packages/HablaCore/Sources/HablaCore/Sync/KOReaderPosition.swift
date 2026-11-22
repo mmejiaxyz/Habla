@@ -52,6 +52,14 @@ public struct KOReaderPositionMap {
     }
 
     func locate(chapter: Int, sentence: Int) -> (Entry, Sentence)? {
+        // Synthetic ids (spoken title, chapter-end silence) are before the chapter's first
+        // real sentence; an e-reader position maps to that start, not to the chapter's end.
+        if sentence < 0 {
+            for e in entries where e.chapter == chapter {
+                if let s = e.sentences.first { return (e, s) }
+            }
+            return nil
+        }
         for e in entries where e.chapter == chapter {
             if let s = e.sentences.first(where: { $0.id == sentence }) { return (e, s) }
         }

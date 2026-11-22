@@ -47,7 +47,8 @@ final class UserTestingRegressionTests: XCTestCase {
         let m = try bundle.manifest()
         let info = try XCTUnwrap(m.chapters.first { $0.audioStatus == .ready })
         let timing = try JSON.decoder.decode(ChapterTiming.self, from: Data(contentsOf: bundle.fileURL(info.timingFile!)))
-        XCTAssertEqual(timing.sentences.map(\.id), Array(0..<info.sentenceCount), "every sentence has a timing")
+        XCTAssertEqual(timing.sentences.filter { $0.id >= 0 }.map(\.id), Array(0..<info.sentenceCount),
+                       "every real sentence has a timing (synthetic title/break ids sit outside)")
     }
 
     // MARK: Import

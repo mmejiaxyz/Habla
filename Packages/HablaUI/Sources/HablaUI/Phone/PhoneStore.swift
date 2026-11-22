@@ -152,6 +152,8 @@ public final class PhoneStore: ObservableObject {
                     self.outbox.append(id)
                 }
                 self.reloadLocal()
+                // Narrate right here when this iPhone has the voice (the Mac still gets the book).
+                for id in addedIDs where self.canNarrateOnPhone(id) { self.narrateOnPhone(id) }
                 if !failedNames.isEmpty { self.error = "Couldn't open \(failedNames.joined(separator: ", ")). Is it a DRM-free EPUB?" }
                 Task { await self.sendOutbox() }
             }
@@ -202,7 +204,75 @@ public final class PhoneStore: ObservableObject {
         return seen
     }
 
-    public func isWaitingForMac(_ id: String) -> Bool { outbox.contains(id) }
+    public func isWaitingForMac(_ id: String) -> Bool { outbox.contains(id) && phoneNarration[id] == nil }
+
+    // MARK: Narrating on this iPhone
+
+    /// The on-device voice (Paradee, from ParadeeKit), set by the iPhone app at launch. Nil in
+    /// tests, snapshots and on the Mac: then books are only narrated by the Mac.
+    nonisolated(unsafe) public static var onDeviceVoice: (@Sendable () -> TTSEngine)?
+    /// Books being narrated on this iPhone → fraction done (0…1).
+    @Published public private(set) var phoneNarration: [String: Double] = [:]
+    private var phoneQueue: [String] = []
+    private var phoneTask: Task<Void, Never>?
+
+    /// This iPhone can narrate the book: it has the voice, the book's language has one, and some
+    /// chapters have no audio yet.
+    public func canNarrateOnPhone(_ id: String) -> Bool {
+        guard Self.onDeviceVoice != nil, let m = manifest(id), BookLanguage.hasVoice(m.language) else { return false }
+        return m.chapters.contains { $0.audioStatus == .pending }
+    }
+
+    /// Narrates the book's missing chapters on this iPhone, one book at a time. Each chapter can
+    /// be played as soon as it's done. Runs while Habla is open, and in the background while
+    /// you're listening (the audio session keeps the app awake); otherwise it resumes next time.
+    public func narrateOnPhone(_ id: String) {
+        guard canNarrateOnPhone(id), phoneNarration[id] == nil else { return }
+        phoneNarration[id] = 0
+        phoneQueue.append(id)
+        guard phoneTask == nil, let makeEngine = Self.onDeviceVoice else { return }
+        let cache = library.deletingLastPathComponent().appendingPathComponent("SentenceCache", isDirectory: true)
+        phoneTask = Task { [weak self] in
+            let engine = makeEngine()
+            let pipeline = RenderPipeline(engine: engine, cacheDirectory: cache)
+            pipeline.cacheLimit = 300_000_000   // a phone's worth; the Mac keeps 2 GB
+            while let self, let id = self.phoneQueue.first {
+                await self.narrate(id, with: pipeline)
+                self.phoneQueue.removeFirst()
+                self.phoneNarration[id] = nil
+                self.reloadLocal()
+            }
+            await engine.shutdown()   // frees the model's memory
+            self?.phoneTask = nil
+        }
+    }
+
+    private func narrate(_ id: String, with pipeline: RenderPipeline) async {
+        let bundle = bundle(id)
+        guard let m = manifest(id) else { return }
+        let voice = m.voice.flatMap { BookLanguage.voice($0.voiceID, speaks: m.language) ? $0 : nil }
+            ?? VoiceInfo(engine: "paradee", voiceID: BookLanguage.defaultVoice(for: m.language))
+        let pending = Set(m.chapters.filter { $0.audioStatus == .pending }.map(\.index))
+        #if canImport(UIKit)
+        // A little extra time to finish the sentence if Habla goes to the background.
+        let background = UIApplication.shared.beginBackgroundTask(withName: "Narrating") {}
+        defer { UIApplication.shared.endBackgroundTask(background) }
+        #endif
+        do {
+            try await pipeline.render(bundle, voice: voice, only: pending) { [weak self] p in
+                let done = (Double(p.chaptersDone) + Double(p.sentence) / Double(max(1, p.sentenceCount))) / Double(max(1, p.chaptersTotal))
+                let chapterFinished = p.sentence == p.sentenceCount
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.phoneNarration[id] = done
+                    if chapterFinished { self.reloadLocal() }   // that chapter is playable now
+                }
+            }
+        } catch is CancellationError {
+        } catch {
+            self.error = "Couldn't narrate “\(m.title)” on this iPhone: \(error)"
+        }
+    }
 
     // MARK: Positions
 
@@ -454,7 +524,13 @@ public final class PhoneStore: ObservableObject {
             await sendOutbox()
             // Bring downloaded books up to date (new chapters narrated, voice changed…) in the
             // background: the library and "Sync now" are usable meanwhile.
-            let outdated = localManifests().filter { m in remote.contains { $0.id == m.id && $0.revision != m.revision } }.map(\.id)
+            // A book narrated on this iPhone is only replaced by the Mac's copy when that copy has
+            // at least as much audio, and never while the iPhone is still narrating it.
+            let outdated = localManifests().filter { m in
+                guard phoneNarration[m.id] == nil else { return false }
+                let ready = m.chapters.filter { $0.audioStatus == .ready }.count
+                return remote.contains { $0.id == m.id && $0.revision != m.revision && $0.readyChapters >= ready }
+            }.map(\.id)
             if !outdated.isEmpty {
                 Task { for id in outdated { try? await self.download(id, silent: true) } }
             }

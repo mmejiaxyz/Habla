@@ -15,3 +15,8 @@ Apps/Habla.xcodeproj/
 *.part
 Tools/voice/worker.log
 Tools/voice/hf/
+
+# ParadeeKit's downloaded files (Scripts/fetch-paradee.sh): ONNX Runtime and the voice models.
+# Package sources and test fixtures are committed; these are fetched, hash-pinned, never committed.
+Packages/ParadeeKit/Vendor/
+Packages/ParadeeKit/Sources/ParadeeKit/Resources/

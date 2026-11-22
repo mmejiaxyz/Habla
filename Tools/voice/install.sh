@@ -53,7 +53,7 @@ echo "STEP Downloading the voices…"
 .venv/bin/python -I - <<'PY'
 from paradee import Paradee
 tts = Paradee(threads=1)
-for voice, text in [("af_heart", "Hello."), ("bf_isabella", "Hello."), ("em_alex", "Hola."), ("ff_siwis", "Bonjour.")]:
+for voice, text in [("af_heart", "Hello."), ("bf_isabella", "Hello."), ("em_alex", "Hola.")]:
     assert len(tts(text, voice=voice)) > 0, voice
 PY
 rm -rf "$UV_CACHE_DIR"

@@ -187,4 +187,11 @@ public final class ReaderModel: ObservableObject {
     public func clearHighlight() { highlight = nil }
 
     public func highlightedSentence(onChapter c: Int) -> Int? { highlight?.chapter == c ? highlight?.sentence : nil }
+
+    /// Where "listen from here" starts: the narrated sentence covering this character,
+    /// when the chapter has audio. Nil → the word card offers no listen button (no dead one).
+    public func narrationStart(at loc: Int) -> Int? {
+        guard manifest.chapters.first(where: { $0.index == chapter })?.audioStatus == .ready else { return nil }
+        return layout?.chapter.sentence(atCharacter: loc)
+    }
 }

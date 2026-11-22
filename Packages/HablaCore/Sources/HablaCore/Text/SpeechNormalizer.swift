@@ -30,8 +30,9 @@ public struct SpeechNormalizer {
         for (pattern, replacement) in Self.abbreviations { s = replace(s, pattern, replacement) }
 
         // Headings: "Chapter IV", "BOOK II.", or a heading that is just "XII".
+        // ("I" alone is the pronoun, but after a chapter word it is the number one.)
         s = replace(s, #"\b(Chapter|CHAPTER|Book|BOOK|Part|PART|Volume|VOLUME|Act|ACT|Scene|SCENE|Canto|CANTO)\s+([IVXLCDM]+)\b\.?"#) { m in
-            "\(m[1]) \(Self.romanToInt(m[2]).map(Self.cardinal) ?? m[2])"
+            "\(m[1]) \(m[2] == "I" ? "one" : (Self.romanToInt(m[2]).map(Self.cardinal) ?? m[2]))"
         }
         if isHeading {
             // A heading that is only a number ("IV", "I.", "12") is a chapter number.
@@ -163,7 +164,7 @@ public struct SpeechNormalizer {
         s = replace(s, #"^\s*,\s*"#, "")
         let words = "Capítulo|CAPÍTULO|Parte|PARTE|Libro|LIBRO|Kapitel|KAPITEL|Teil|TEIL|Глава|ГЛАВА|Часть|ЧАСТЬ|Розділ|РОЗДІЛ|Частина|ЧАСТИНА"
         s = replace(s, #"\b("# + words + #")\s+([IVXLCDM]+)\b\.?"#) { m in
-            "\(m[1]) \(Self.romanToInt(m[2]).map(String.init) ?? m[2])"
+            "\(m[1]) \(m[2] == "I" ? "1" : (Self.romanToInt(m[2]).map(String.init) ?? m[2]))"
         }
         if isHeading {
             let bare = s.trimmingCharacters(in: CharacterSet(charactersIn: " ."))

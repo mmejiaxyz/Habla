@@ -16,12 +16,13 @@ enum PhoneCover: Identifiable {
     }
 }
 
-/// The iPhone app: library → book → player ⇄ reader, plus the Mac connection.
+/// The iPhone app: three tabs (Library, Search, Mac) → book → player ⇄ reader.
 /// Positions from listening and reading go to the same store (and on to the Mac).
 public struct PhoneRoot: View {
     @StateObject private var store: PhoneStore
     @StateObject private var player = NarrationPlayer()
     @State private var path: [PhoneRoute] = []
+    @State private var tab: PhoneTab = .library
     @State private var cover: PhoneCover?
     @State private var repairAttempts: [String: Date] = [:]
     @Environment(\.scenePhase) private var phase
@@ -32,13 +33,12 @@ public struct PhoneRoot: View {
 
     public var body: some View {
         NavigationStack(path: $path) {
-            PhoneLibraryView(store: store, player: player, open: open)
+            PhoneTabsView(store: store, player: player, tab: $tab, open: open)
                 .toolbar(.hidden)
                 .navigationDestination(for: PhoneRoute.self) { route in
                     Group {
                         switch route {
                         case .book(let id): PhoneBookView(store: store, player: player, id: id, open: open, close: pop)
-                        case .mac: PhoneMacView(store: store, close: pop)
                         default: EmptyView()
                         }
                     }
@@ -85,7 +85,7 @@ public struct PhoneRoot: View {
         .onOpenURL { url in
             if url.isFileURL { store.importBooks([url]) }
             // The QR code in Habla Studio, scanned with the Camera.
-            else if let invite = PairingInvite(url: url) { path = [.mac]; Task { await store.pair(invite: invite) } }
+            else if let invite = PairingInvite(url: url) { path = []; tab = .mac; Task { await store.pair(invite: invite) } }
         }
         .onChange(of: phase) { _, p in
             switch p {
@@ -109,10 +109,15 @@ public struct PhoneRoot: View {
     }
 
     var playerScreen: some View {
-        PhonePlayerView(player: player, close: { cover = nil }, read: {
+        PhonePlayerView(player: player, cover: playerCover, close: { cover = nil }, read: {
             guard let id = player.bookID, let model = makeReader(id, chapter: player.chapter, sentence: player.sentence) else { return }
             cover = .reader(model)
         })
+    }
+
+    var playerCover: Image? {
+        guard let id = player.bookID, let b = store.books.first(where: { $0.id == id }) else { return nil }
+        return CoverCache.image(bundle: store.bundle(id).url, revision: b.revision)
     }
 
     func readerScreen(_ model: ReaderModel) -> some View {
@@ -128,6 +133,7 @@ public struct PhoneRoot: View {
         case .reader(let id):
             let p = store.progress.position(for: id)
             if let model = makeReader(id, chapter: p?.chapter, sentence: p?.sentence) { cover = .reader(model) }
+        case .mac: path = []; tab = .mac
         default: path.append(route)
         }
     }

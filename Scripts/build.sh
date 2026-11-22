@@ -12,6 +12,8 @@ VERSIONS=(CURRENT_PROJECT_VERSION="$BUILD_NUMBER" MARKETING_VERSION="1.$BUILD_NU
 DD="$ROOT/.build/DD-release"
 DIST="$ROOT/dist"
 mkdir -p "$DIST"
+# The iPhone's on-device voice (ONNX Runtime + Paradee model, hash-pinned downloads).
+"$ROOT/Scripts/fetch-paradee.sh"
 cd "$ROOT/Apps"
 command -v xcodegen >/dev/null && xcodegen generate -q
 

@@ -53,7 +53,7 @@ public struct BookItem: Identifiable, Hashable, Sendable {
     public var isStarted: Bool { position != nil }
     public var isFullyNarrated: Bool { narratable > 0 && narrated >= narratable }
     public var hasAudio: Bool { narrated > 0 }
-    /// Nothing to narrate: the book's language has no voice yet (German, Russian, Ukrainian).
+    /// Nothing to narrate: the book's language has no voice yet (German, Russian, Ukrainian, French, Hindi).
     public var isTextOnly: Bool { narratable == 0 }
 
     /// The chapter to resume: saved position, else the first non-front-matter chapter.

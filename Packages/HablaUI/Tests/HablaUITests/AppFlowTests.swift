@@ -334,6 +334,60 @@ final class AppFlowTests: XCTestCase {
         XCTAssertNotNil(player.message)
         XCTAssertFalse(saved.isEmpty, "seeks save the position")
     }
+
+    /// Books whose language has no voice (French, Hindi, German, …) must never be queued for
+    /// narration, even when an older version narrated them: their existing audio keeps playing,
+    /// but no English voice may re-narrate them. Covers auto-resume on launch, narrate() and setVoice.
+    func testBooksWithoutAVoiceAreNeverQueuedForNarration() {
+        let support = temp()
+        let lib = support.appendingPathComponent("Library")
+        try! FileManager.default.createDirectory(at: lib, withIntermediateDirectories: true)
+        func writeManifest(_ lang: String, narrated: Bool) -> String {
+            let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            func chapter(_ index: Int, _ title: String, ready: Bool) -> [String: Any] {
+                var c: [String: Any] = [
+                    "index": index, "title": title, "textFile": String(format: "ch%03d.json", index),
+                    "sentenceCount": 3, "wordCount": 20, "isFrontMatter": index == 0,
+                    "spineIndex": index, "href": "c\(index).xhtml",
+                    "audioStatus": index == 0 ? "skipped" : ready ? "ready" : "pending",
+                ]
+                if ready { c["audioFile"] = "a.m4a"; c["duration"] = 2.0; c["voiceID"] = "tone" }
+                return c
+            }
+            var m: [String: Any] = [
+                "formatVersion": 1, "id": id, "title": "T", "author": "A", "language": lang,
+                "sourceFileName": "x.epub", "koreaderDigest": "k", "accentColor": "#000000",
+                "createdAt": "2024-01-01T00:00:00Z", "updatedAt": "2024-01-01T00:00:00Z", "revision": 1,
+                "chapters": [chapter(0, "Front", ready: false), chapter(1, "One", ready: narrated),
+                             chapter(2, "Two", ready: false)],
+                "files": [],
+            ]
+            if narrated { m["voice"] = ["engine": "tone", "voiceID": "tone", "speed": 1.0] }
+            let dir = lib.appendingPathComponent("\(id).habla")
+            try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try! JSONSerialization.data(withJSONObject: m).write(to: dir.appendingPathComponent(BookBundle.manifestFile))
+            return id
+        }
+        let narratedFR = writeManifest("fr", narrated: true)
+        let narratedHI = writeManifest("hi", narrated: true)
+        let plainDE = writeManifest("de", narrated: false)
+        let plainES = writeManifest("es", narrated: false)
+
+        let store = StudioStore(support: support)
+        XCTAssertEqual(Set(store.books.map(\.id)), Set([narratedFR, narratedHI, plainDE, plainES]))
+        // Auto-resume on launch must skip voice-less books — also ones an older version narrated.
+        XCTAssertEqual(store.queue, [], "voice-less books must not auto-queue, narrated ones included")
+        store.narrate(narratedFR)
+        store.narrate(plainDE)
+        store.narrate("not-a-book")
+        XCTAssertEqual(store.queue, [], "narrate() is a no-op without a voice (or for unknown ids)")
+        if let fr = store.books.first(where: { $0.id == narratedFR }) {
+            store.setVoice("af_heart", for: fr)   // picking a voice must not start narrating either
+        }
+        XCTAssertEqual(store.queue, [])
+        store.narrate(plainES)   // Spanish is a narration language: queued normally
+        XCTAssertEqual(store.queue, [plainES])
+    }
 }
 
 final class Locked<T>: @unchecked Sendable {

@@ -6,6 +6,10 @@ import Foundation
 /// and the iOS app (reader). Positions everywhere are (chapter, sentence).
 public struct BookManifest: Codable, Equatable, Sendable {
     public static let currentFormatVersion = 1
+    /// Version of the narration plan (spoken titles, chapter-break silence). A chapter whose
+    /// audio was made with an older plan is re-narrated by the Mac; the sentence cache makes
+    /// that cheap (only the title sentence is new). Bump when the plan changes shape.
+    public static let currentPlanVersion = 1
 
     public var formatVersion: Int = BookManifest.currentFormatVersion
     public var id: String
@@ -39,10 +43,13 @@ public struct BookManifest: Codable, Equatable, Sendable {
         chapters.allSatisfy { $0.audioStatus != .pending }
     }
 
-    /// Chapters that still need narrating with `voiceID` (pending, or narrated with another voice).
+    /// Chapters that still need narrating with `voiceID`: pending, narrated with another voice,
+    /// or narrated with an older narration plan (a spoken title / chapter break is missing).
     public func chaptersToNarrate(voiceID: String) -> [ChapterInfo] {
         chapters.filter { c in
-            c.audioStatus == .pending || (c.audioStatus == .ready && (c.voiceID ?? voice?.voiceID) != voiceID)
+            c.audioStatus == .pending
+                || (c.audioStatus == .ready && ((c.voiceID ?? voice?.voiceID) != voiceID
+                                                || (c.planVersion ?? 0) < BookManifest.currentPlanVersion))
         }
     }
 }
@@ -76,6 +83,8 @@ public struct ChapterInfo: Codable, Equatable, Sendable {
     public var voiceID: String? = nil
     /// The voice model that narrated it, e.g. "Paradee 1.3" (nil in older bundles).
     public var model: String? = nil
+    /// The narration plan that made this chapter's audio (nil in older bundles → re-narrate).
+    public var planVersion: Int? = nil
 }
 
 public struct FileEntry: Codable, Equatable, Hashable, Sendable {
@@ -218,7 +227,7 @@ public struct SentenceTiming: Codable, Equatable, Sendable {
 }
 
 public extension BookManifest {
-    /// Paradee can narrate this book's language (English, Spanish, French, Hindi). Others are read-only.
+    /// Paradee can narrate this book's language (English, Spanish). Others are read-only.
     var canNarrate: Bool { BookLanguage.hasVoice(language) }
 
     /// The imprint: which voice models narrated this book (usually one; two if the model

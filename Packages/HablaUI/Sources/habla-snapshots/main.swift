@@ -14,8 +14,17 @@ try? fm.createDirectory(at: out, withIntermediateDirectories: true)
 let phone = CGSize(width: 390, height: 844)
 let languagesMode = args.count >= 4 && args[3] == "--languages"
 
-@MainActor func render<V: View>(_ name: String, _ view: V, size: CGSize = phone, scale: CGFloat = 3, dark: Bool = false) {
-    let r = ImageRenderer(content: view.frame(width: size.width, height: size.height)
+/// iPhone 13 safe area (status bar, home indicator). ImageRenderer has none, so `device: true`
+/// reserves it the way the phone does; backgrounds that ignore the safe area still fill it.
+let deviceInsets = (top: CGFloat(47), bottom: CGFloat(34))
+/// Reader page height inside the device safe area (matches ReaderView: chrome 74 + footer 22).
+let readerPageHeight = phone.height - deviceInsets.top - deviceInsets.bottom - 74 - 22
+
+@MainActor func render<V: View>(_ name: String, _ view: V, size: CGSize = phone, scale: CGFloat = 3, dark: Bool = false, device: Bool = false) {
+    let framed = view
+        .safeAreaInset(edge: .top, spacing: 0) { Color.clear.frame(height: device ? deviceInsets.top : 0) }
+        .safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: device ? deviceInsets.bottom : 0) }
+    let r = ImageRenderer(content: framed.frame(width: size.width, height: size.height)
         .environment(\.staticLayout, true).environment(\.colorScheme, dark ? .dark : .light))
     r.scale = scale
     guard let cg = r.cgImage else { print("✗ \(name)"); return }
@@ -89,9 +98,9 @@ let languagesMode = args.count >= 4 && args[3] == "--languages"
     // Reader pages: compute the page size the way ReaderView does on a phone.
     func reader(_ name: String, _ theme: ReaderTheme, chrome: Bool, chapter: Int, sentence: Int?, highlight: Bool, size: CGFloat = 19) {
         let model = ReaderModel(bundle: mb, manifest: main.1, chapter: chapter, sentence: sentence, style: ReaderStyle(theme: theme, fontSize: size))
-        model.setPageSize(CGSize(width: phone.width - 52, height: phone.height - 74 - 22))
+        model.setPageSize(CGSize(width: phone.width - 52, height: readerPageHeight))
         if highlight, let s = sentence { model.follow(chapter: chapter, sentence: s) }
-        render(name, ReaderView(model: model, player: highlight ? player : NarrationPlayer(), chrome: chrome, onClose: {}))
+        render(name, ReaderView(model: model, player: highlight ? player : NarrationPlayer(), chrome: chrome, onClose: {}), device: true)
     }
     reader("p6-reader-original", .original, chrome: false, chapter: audioChapter, sentence: nil, highlight: false)
     reader("p7-reader-listening", .original, chrome: false, chapter: audioChapter, sentence: 14, highlight: true)
@@ -99,7 +108,7 @@ let languagesMode = args.count >= 4 && args[3] == "--languages"
     reader("p9-reader-focus-large", .focus, chrome: false, chapter: audioChapter + 1, sentence: nil, highlight: false, size: 24)
     do {
         let model = ReaderModel(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: nil, style: ReaderStyle())
-        model.setPageSize(CGSize(width: phone.width - 52, height: phone.height - 74 - 22))
+        model.setPageSize(CGSize(width: phone.width - 52, height: readerPageHeight))
         if let l = model.layout {
             for u in model.annotations.underlines(book: main.1.id) { model.removeUnderline(u) }
             var hits: [NSRange] = []
@@ -107,9 +116,9 @@ let languagesMode = args.count >= 4 && args[3] == "--languages"
             if let r = hits.first, let s = model.sentenceRange(around: r.location) { model.addUnderline(s) }
         }
         let fm2 = ReaderModel(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: nil, style: ReaderStyle())
-        fm2.setPageSize(CGSize(width: phone.width - 52, height: phone.height - 74 - 22))
-        render("p12-reader-find", ReaderView(model: fm2, player: NarrationPlayer(), onClose: {}, previewFind: "Netherfield"))
-        render("p10-reader-word", ReaderView(model: model, player: NarrationPlayer(), onClose: {}, previewWordAt: CGPoint(x: 200, y: 300)))
+        fm2.setPageSize(CGSize(width: phone.width - 52, height: readerPageHeight))
+        render("p12-reader-find", ReaderView(model: fm2, player: NarrationPlayer(), onClose: {}, previewFind: "Netherfield"), device: true)
+        render("p10-reader-word", ReaderView(model: model, player: NarrationPlayer(), onClose: {}, previewWordAt: CGPoint(x: 200, y: 300)), device: true)
     }
 
     // ---- Mac ----
