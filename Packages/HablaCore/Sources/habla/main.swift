@@ -119,7 +119,8 @@ do {
         let speed = Double(option("speed") ?? "1.0") ?? 1.0
         let only = option("chapters").map { Set($0.split(separator: ",").compactMap { Int($0) }) }
         let engineName = option("engine") ?? "kokoro"
-        let engine: TTSEngine = engineName == "tone" ? ToneEngine() : KokoroEngine(configuration: .init(toolsDirectory: kokoroDir))
+        let engine: TTSEngine = engineName == "tone" ? ToneEngine()
+            : EnginePool((0..<EnginePool.recommendedWorkers).map { _ in KokoroEngine(configuration: .init(toolsDirectory: kokoroDir)) })
         let pipeline = RenderPipeline(engine: engine, cacheDirectory: cacheDir)
         let b = bundle(args[0])
         let start = Date()

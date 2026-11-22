@@ -43,6 +43,14 @@ public struct ReaderView: View {
     @State private var toastTask: Task<Void, Never>?
     @State private var lastTurn = Date.distantPast
     @State private var selection: WordSelection?
+    @State private var touch: TouchState?
+    @State private var holdTask: Task<Void, Never>?
+    @State private var pendingTap: Task<Void, Never>?
+    #if os(macOS)
+    @State private var lastClick: (time: Date, at: CGPoint)?
+    #endif
+
+    struct TouchState { var start: CGPoint; var began: Date; var moved = false; var held = false }
     @State private var sentenceScope = false
     @State private var dictionaryTerm: String?
     @State private var translateText: String?
@@ -147,32 +155,81 @@ public struct ReaderView: View {
         .frame(width: size.width, height: size.height, alignment: .top)
         .clipped()
         .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 24).onEnded { v in
-            guard selection == nil else { return }
-            if v.translation.width < -40 { turn(true) } else if v.translation.width > 40 { turn(false) }
-        })
-        // Press and hold a word (double-click on the Mac) for underline, dictionary and translate.
-        .simultaneousGesture(LongPressGesture(minimumDuration: 0.35)
-            .sequenced(before: DragGesture(minimumDistance: 0))
-            .onChanged { v in
-                if case .second(true, let drag?) = v, selection == nil { select(at: drag.startLocation, in: size) }
-            })
-        #if os(macOS)
-        .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { tap in select(at: tap.location, in: size) })
-        #endif
+        // One handler decides what a touch was: tap, press-and-hold, or swipe (they used to
+        // fire together: holding a word also turned the page).
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { v in touchChanged(v, in: size) }
+            .onEnded { v in touchEnded(v, in: size) })
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Next page") { turn(true) }
         .accessibilityAction(named: "Previous page") { turn(false) }
         .accessibilityAction(named: chrome ? "Hide controls" : "Show controls") { chrome.toggle() }
         .accessibilityAction(.escape) { onClose() }
         .accessibilityScrollAction { edge in turn(edge == .trailing || edge == .bottom) }
-        .simultaneousGesture(SpatialTapGesture().onEnded { tap in
-            if selection != nil { withAnimation(.easeOut(duration: 0.15)) { selection = nil }; return }
-            let x = tap.location.x / max(1, size.width)
-            if isSpread { turn(x > 0.5); return }
-            if x > 0.72 { turn(true) } else if x < 0.28 { turn(false) }
-            else { withAnimation(.easeOut(duration: 0.18)) { chrome.toggle() } }
-        })
+    }
+
+    // MARK: Touch
+
+    static let holdDelay: TimeInterval = 0.4
+    static let slop: CGFloat = 10           // movement still counted as "not moving"
+
+    func touchChanged(_ v: DragGesture.Value, in size: CGSize) {
+        if touch == nil {
+            touch = TouchState(start: v.startLocation, began: Date())
+            let start = v.startLocation
+            holdTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(Self.holdDelay * 1_000_000_000))
+                guard !Task.isCancelled, var t = touch, !t.moved else { return }
+                t.held = true
+                touch = t
+                pendingTap?.cancel()
+                select(at: start, in: size)
+            }
+        }
+        if var t = touch, !t.moved, hypot(v.translation.width, v.translation.height) > Self.slop {
+            t.moved = true
+            touch = t
+            holdTask?.cancel()
+        }
+    }
+
+    func touchEnded(_ v: DragGesture.Value, in size: CGSize) {
+        holdTask?.cancel()
+        let t = touch
+        touch = nil
+        guard let t, !t.held else { return }           // the hold already opened the word card
+        if t.moved {
+            guard selection == nil else { return }
+            if v.translation.width < -40 { turn(true) } else if v.translation.width > 40 { turn(false) }
+            return
+        }
+        #if os(macOS)
+        // A double-click on a word opens the card; wait a moment before treating a click as a tap.
+        if let last = lastClick, Date().timeIntervalSince(last.time) < NSEvent.doubleClickInterval,
+           hypot(last.at.x - v.location.x, last.at.y - v.location.y) < 8 {
+            pendingTap?.cancel(); lastClick = nil
+            select(at: v.location, in: size)
+            return
+        }
+        lastClick = (Date(), v.location)
+        let at = v.location
+        pendingTap?.cancel()
+        pendingTap = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(NSEvent.doubleClickInterval * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            tap(at: at, in: size)
+        }
+        #else
+        tap(at: v.location, in: size)
+        #endif
+    }
+
+    func tap(at point: CGPoint, in size: CGSize) {
+        if selection != nil { withAnimation(.easeOut(duration: 0.15)) { selection = nil }; return }
+        let x = point.x / max(1, size.width)
+        if isSpread { turn(x > 0.5); return }
+        if x > 0.72 { turn(true) } else if x < 0.28 { turn(false) }
+        else { withAnimation(.easeOut(duration: 0.18)) { chrome.toggle() } }
     }
 
     func footer(width: CGFloat) -> some View {

@@ -614,6 +614,31 @@ final class XteinkTests: XCTestCase {
         XCTAssertEqual(Pairing.normalize("abcde fgh-iO"), "ABCDEFGH10")
         XCTAssertEqual(Pairing.newCode().count, 11)
     }
+
+    /// Parallel workers answering out of order still produce an in-order chapter.
+    func testEnginePoolKeepsSentenceOrder() async throws {
+        struct Jittery: TTSEngine {
+            let name = "tone"; let cacheVersion = "tone-1"
+            func voices() async throws -> [String] { ["tone"] }
+            func synthesize(_ text: String, voice: VoiceInfo) async throws -> SpeechAudio {
+                try await Task.sleep(nanoseconds: UInt64.random(in: 1...30) * 1_000_000)
+                return try await ToneEngine().synthesize(text, voice: voice)
+            }
+        }
+        let root = Fixtures.tempDir()
+        let bundle = try BookImporter().importEPUB(at: Fixtures.writeSampleEPUB(to: root), into: root.appendingPathComponent("lib"))
+        let pool = EnginePool([Jittery(), Jittery(), Jittery()])
+        let pipeline = RenderPipeline(engine: pool, cacheDirectory: root.appendingPathComponent("cache"))
+        XCTAssertEqual(pipeline.lookahead, 4)
+        try await pipeline.render(bundle, voice: VoiceInfo(engine: "tone", voiceID: "tone"))
+        let m = try bundle.manifest()
+        for info in m.chapters where info.audioStatus == .ready {
+            let timing = try JSON.decoder.decode(ChapterTiming.self, from: Data(contentsOf: bundle.fileURL(info.timingFile!)))
+            XCTAssertEqual(timing.sentences.map(\.id), timing.sentences.map(\.id).sorted())
+            XCTAssertEqual(timing.sentences.map(\.start), timing.sentences.map(\.start).sorted())
+        }
+        XCTAssertGreaterThan(m.chapters.filter { $0.audioStatus == .ready }.count, 0)
+    }
 }
 
 final class Locked<T>: @unchecked Sendable {

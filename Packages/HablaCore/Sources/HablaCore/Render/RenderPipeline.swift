@@ -37,6 +37,9 @@ public final class RenderPipeline: @unchecked Sendable {
         self.cacheDirectory = cacheDirectory
     }
 
+    /// Sentences voiced ahead of the one being written: enough to keep every engine busy.
+    var lookahead: Int { max(1, (engine as? EnginePool)?.size ?? 1) + 1 }
+
     /// Renders pending chapters (all narratable ones if the voice changed).
     /// The manifest is committed after every chapter so a partially rendered
     /// book can already sync and play.
@@ -62,10 +65,24 @@ public final class RenderPipeline: @unchecked Sendable {
             guard FileManager.default.fileExists(atPath: bundle.url.path) else { throw CancellationError() }
 
             let writer = AudioAssembler.Writer(assembler: assembler, url: bundle.fileURL(audioPath))
+            // Voice a few sentences ahead (in parallel on an engine pool); write them in order.
+            var ahead: [Int: Task<(SpeechAudio, Bool), Error>] = [:]
+            func launch(_ k: Int) {
+                guard k < plan.count, ahead[k] == nil else { return }
+                let text = plan[k].spoken
+                ahead[k] = Task { try await self.sentenceAudioWithRetry(text, voice: voice) }
+            }
+            defer { ahead.values.forEach { $0.cancel() } }
             do {
+                for k in 0..<min(lookahead, plan.count) { launch(k) }
                 for (k, item) in plan.enumerated() {
                     try Task.checkCancellation()
-                    let (audio, hit) = try await sentenceAudioWithRetry(item.spoken, voice: voice)
+                    launch(k)
+                    let (audio, hit) = try await withTaskCancellationHandler {
+                        try await ahead[k]!.value
+                    } onCancel: { [ahead] in ahead.values.forEach { $0.cancel() } }
+                    ahead[k] = nil
+                    launch(k + lookahead)
                     try writer.append(.init(sentenceID: item.id, audio: audio, pauseAfter: item.pause))
                     progress?(RenderProgress(chapterIndex: info.index, chapterTitle: info.title, sentence: k + 1,
                                              sentenceCount: plan.count, chaptersDone: n, chaptersTotal: todo.count,
@@ -98,7 +115,9 @@ public final class RenderPipeline: @unchecked Sendable {
     /// One retry (the engine restarts its worker on failure). A sentence that still fails
     /// becomes a short silence rather than stopping the whole book; it is not cached, so a
     /// later re-narration tries it again.
-    public private(set) var skippedSentences = 0
+    public var skippedSentences: Int { skipLock.withLock { skipped } }
+    private var skipped = 0
+    private let skipLock = NSLock()
 
     func sentenceAudioWithRetry(_ text: String, voice: VoiceInfo) async throws -> (SpeechAudio, Bool) {
         do { return try await sentenceAudio(text, voice: voice) }
@@ -111,7 +130,7 @@ public final class RenderPipeline: @unchecked Sendable {
             catch {
                 // Engine unusable (not installed, model missing): stop, so the user sees why.
                 if case TTSError.engineUnavailable = error { throw error }
-                skippedSentences += 1
+                skipLock.withLock { skipped += 1 }
                 return (SpeechAudio(samples: [Float](repeating: 0, count: 12_000), sampleRate: 24_000), false)
             }
         }

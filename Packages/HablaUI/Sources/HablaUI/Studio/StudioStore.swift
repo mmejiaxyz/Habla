@@ -83,7 +83,7 @@ public final class StudioStore: ObservableObject {
     public let library: URL
     public let progress: ProgressStore
     let server: LibraryServer
-    private var engine: KokoroEngine?
+    private var engine: EnginePool?
     private var renderTask: Task<Void, Never>?
     private var xteinkTask: Task<Void, Never>?
     private var xteinkKick = false
@@ -173,6 +173,12 @@ public final class StudioStore: ObservableObject {
     }
 
     public var serverName: String { server.serviceName }
+
+    /// Kokoro workers for narration: two on Macs with enough cores and memory (~40% faster).
+    func makeEngine() -> EnginePool {
+        let cfg = KokoroEngine.Configuration(toolsDirectory: kokoroDirectory)
+        return EnginePool((0..<EnginePool.recommendedWorkers).map { _ in KokoroEngine(configuration: cfg) })
+    }
 
     public var kokoroDirectory: URL { support.appendingPathComponent("kokoro", isDirectory: true) }
 
@@ -400,7 +406,7 @@ public final class StudioStore: ObservableObject {
         guard renderTask == nil, !paused, let id = queue.first else { return }
         guard kokoro == .ready else { return }
         guard let m = books.first(where: { $0.id == id }), !deleting.contains(id) else { queue.removeFirst(); pump(); return }
-        let engine = self.engine ?? KokoroEngine(configuration: .init(toolsDirectory: kokoroDirectory))
+        let engine = self.engine ?? makeEngine()
         self.engine = engine
         let pipeline = RenderPipeline(engine: engine, cacheDirectory: support.appendingPathComponent("SentenceCache"))
         let bundle = BookBundle(url: BookBundle.url(for: id, in: library))
@@ -475,7 +481,7 @@ public final class StudioStore: ObservableObject {
     public func preview(_ voice: String) {
         guard kokoro == .ready, previewing == nil else { return }
         previewing = voice
-        let engine = self.engine ?? KokoroEngine(configuration: .init(toolsDirectory: kokoroDirectory))
+        let engine = self.engine ?? makeEngine()
         self.engine = engine
         Task {
             defer { Task { @MainActor in self.previewing = nil } }

@@ -5,7 +5,8 @@ import Foundation
 /// The worker starts on first use and keeps the model loaded until `shutdown()`.
 public actor KokoroEngine: TTSEngine {
     public nonisolated let name = "kokoro"
-    public nonisolated let cacheVersion = "kokoro-v1.0-onnx"
+    /// Cached audio is only reused for the same model file (the int8 model sounds a little different).
+    public nonisolated let cacheVersion: String
 
     public struct Configuration: Sendable {
         public var python: URL
@@ -36,6 +37,8 @@ public actor KokoroEngine: TTSEngine {
 
     public init(configuration: Configuration) {
         config = configuration
+        let model = configuration.model.deletingPathExtension().lastPathComponent   // "kokoro-v1.0"
+        cacheVersion = model == "kokoro-v1.0" ? "kokoro-v1.0-onnx" : "\(model)-onnx"
         scratch = FileManager.default.temporaryDirectory.appendingPathComponent("habla-kokoro-\(UUID().uuidString)")
     }
 
