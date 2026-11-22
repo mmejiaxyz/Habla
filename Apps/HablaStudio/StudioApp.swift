@@ -27,7 +27,7 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Habla for Mac: import EPUBs, narrate them with Kokoro, share with your iPhone.
+/// Habla for Mac: import EPUBs, narrate them with Paradee, share with your iPhone.
 @main
 struct StudioApp: App {
     @NSApplicationDelegateAdaptor(StudioAppDelegate.self) private var delegate

@@ -10,7 +10,7 @@ public struct SpeechAudio: Sendable {
 
 /// A voice. Renders run on the Mac; the iPhone only plays the results.
 public protocol TTSEngine: Sendable {
-    /// Stable identifier, e.g. "kokoro".
+    /// Stable identifier, e.g. "paradee".
     var name: String { get }
     /// Part of the sentence cache key: bump it to invalidate cached audio.
     var cacheVersion: String { get }
@@ -18,7 +18,7 @@ public protocol TTSEngine: Sendable {
     func synthesize(_ text: String, voice: VoiceInfo) async throws -> SpeechAudio
     /// Release the model / worker process.
     func shutdown() async
-    /// Human-readable model name for the imprint, e.g. "Kokoro v1.0 · fast (int8)".
+    /// Human-readable model name for the imprint, e.g. "Paradee 1.3".
     var modelDescription: String { get }
 }
 

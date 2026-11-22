@@ -3,9 +3,9 @@
 DerivedData/
 *.xcodeproj/xcuserdata/
 xcuserdata/
-Tools/kokoro/.venv/
-Tools/kokoro/models/
-Tools/kokoro/setup.log
+Tools/voice/.venv/
+Tools/voice/models/
+Tools/voice/setup.log
 Output/
 T_epub/
 Tools/bakeoff/
@@ -13,4 +13,5 @@ dist/
 Apps/Habla.xcodeproj/
 .swiftpm/
 *.part
-Tools/kokoro/worker.log
+Tools/voice/worker.log
+Tools/voice/hf/

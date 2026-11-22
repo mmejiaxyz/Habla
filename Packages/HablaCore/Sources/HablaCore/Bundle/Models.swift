@@ -48,7 +48,7 @@ public struct BookManifest: Codable, Equatable, Sendable {
 }
 
 public struct VoiceInfo: Codable, Equatable, Hashable, Sendable {
-    public var engine: String      // "kokoro", "system", ...
+    public var engine: String      // "paradee" (or "kokoro" in older books)
     public var voiceID: String     // e.g. "af_heart"
     public var speed: Double       // render speed; playback rate is separate
     public init(engine: String, voiceID: String, speed: Double = 1.0) {
@@ -74,7 +74,7 @@ public struct ChapterInfo: Codable, Equatable, Sendable {
     public var audioStatus: AudioStatus
     /// Voice this chapter's audio was made with (nil = the book's voice, older bundles).
     public var voiceID: String? = nil
-    /// The voice model that narrated it, e.g. "Kokoro v1.0 · fast (int8)" (nil in older bundles).
+    /// The voice model that narrated it, e.g. "Paradee 1.3" (nil in older bundles).
     public var model: String? = nil
 }
 
@@ -218,7 +218,7 @@ public struct SentenceTiming: Codable, Equatable, Sendable {
 }
 
 public extension BookManifest {
-    /// Kokoro can narrate this book's language (English, Spanish). Others are text-only.
+    /// Paradee can narrate this book's language (English, Spanish, French, Hindi). Others are read-only.
     var canNarrate: Bool { BookLanguage.hasVoice(language) }
 
     /// The imprint: which voice models narrated this book (usually one; two if the model

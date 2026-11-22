@@ -61,10 +61,14 @@ final class LanguageTests: XCTestCase {
         XCTAssertEqual(BookLanguage.normalize("en-US"), "en")
         XCTAssertEqual(BookLanguage.normalize("ukr"), "uk")
         XCTAssertEqual(BookLanguage.normalize("ger"), "de")
-        XCTAssertEqual(BookLanguage.defaultVoice(for: "es"), "ef_dora")
+        XCTAssertEqual(BookLanguage.defaultVoice(for: "es"), "em_alex")
+        XCTAssertEqual(BookLanguage.closestVoice(to: "af_bella", for: "en"), "af_heart", "a Kokoro-only voice maps to the nearest one")
+        XCTAssertEqual(BookLanguage.closestVoice(to: "bm_george", for: "en"), "bm_fable")
+        XCTAssertEqual(BookLanguage.closestVoice(to: "ef_dora", for: "es"), "em_alex")
+        XCTAssertTrue(BookLanguage.hasVoice("fr") && BookLanguage.hasVoice("hi"))
+        XCTAssertFalse(BookLanguage.hasVoice("de") || BookLanguage.hasVoice("ru") || BookLanguage.hasVoice("uk"))
         XCTAssertFalse(BookLanguage.voice("af_heart", speaks: "es"))
         XCTAssertTrue(BookLanguage.voice("em_alex", speaks: "es"))
-        XCTAssertEqual(KokoroEngine.language(for: "ef_dora", default: "en-us"), "es")
         XCTAssertEqual(BookLanguage.name("de"), "German")
     }
 }

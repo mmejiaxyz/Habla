@@ -24,7 +24,7 @@ public struct StudioWindowView: View {
             sidebar.frame(width: 320)
             Rectangle().fill(Theme.hairline).frame(width: 0.5)
             VStack(spacing: 0) {
-                if store.kokoro != .ready { kokoroBanner }
+                if store.voiceEngine != .ready { voiceEngineBanner }
                 updateBanner
                 if let m = store.selected { detail(m) } else { emptyDetail }
             }
@@ -242,31 +242,31 @@ public struct StudioWindowView: View {
         }
     }
 
-    // MARK: Kokoro
+    // MARK: Voice engine
 
-    var kokoroBanner: some View {
+    var voiceEngineBanner: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
-                switch store.kokoro {
+                switch store.voiceEngine {
                 case .installing(let step):
                     Text("Installing the voice engine…").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                     Text(step).font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.85))
                 case .failed(let msg):
                     Text("The voice engine couldn't be installed").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                     Text(msg).font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.85)).lineLimit(2)
-                        .help(store.kokoroLog.suffix(15).joined(separator: "\n"))
+                        .help(store.voiceEngineLog.suffix(15).joined(separator: "\n"))
                 case .checking:
                     Text("Checking the voice engine…").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                 default:
                     Text("Install the voice engine to narrate books").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
-                    Text("Kokoro runs on this Mac, free and offline. One download of about 350 MB — nothing else to install.")
+                    Text("Paradee runs on this Mac, free and offline. One download of about 250 MB — nothing else to install.")
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.85))
                 }
             }
             Spacer()
-            if case .installing = store.kokoro { ProgressView().controlSize(.small) }
+            if case .installing = store.voiceEngine { ProgressView().controlSize(.small) }
             else if let script = installScript {
-                CapsuleButton(store.kokoro == .missing ? "Install" : "Try again", fill: Theme.screen.opacity(0.7)) { store.installKokoro(script: script) }
+                CapsuleButton(store.voiceEngine == .missing ? "Install" : "Try again", fill: Theme.screen.opacity(0.7)) { store.installVoiceEngine(script: script) }
             }
         }
         .padding(.horizontal, 24).padding(.vertical, 14)
@@ -305,7 +305,7 @@ public struct StudioWindowView: View {
                         VStack(spacing: 0) { ForEach(store.voices(for: m), id: \.self) { v in voiceRow(v, book: m) } }
                     }
                 } else {
-                    Text("Kokoro has no \(BookLanguage.name(m.language)) voice yet. This book is ready to read here and on your iPhone; narration will come if a voice is added.")
+                    Text("There’s no \(BookLanguage.name(m.language)) voice yet. This book is ready to read here and on your iPhone.")
                         .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 8)
                 }
@@ -363,7 +363,7 @@ public struct StudioWindowView: View {
             return "Narrating “\(r.chapterTitle)” · sentence \(r.sentence) of \(r.sentenceCount)\(eta)"
         }
         if !m.canNarrate { return "Text only · no \(BookLanguage.name(m.language)) voice yet" }
-        if store.queue.contains(m.id) { return store.paused ? "Paused" : (store.kokoro == .ready ? "Waiting for another book" : "Waiting for the voice engine") }
+        if store.queue.contains(m.id) { return store.paused ? "Paused" : (store.voiceEngine == .ready ? "Waiting for another book" : "Waiting for the voice engine") }
         if item.isFullyNarrated { return "\(Format.duration(m.totalDuration)) · \(voiceName(store.voice(for: m)))" }
         return "Not narrated yet — you can still read it"
     }
@@ -380,8 +380,8 @@ public struct StudioWindowView: View {
         } else if queued {
             pill("Cancel", filled: false) { store.cancelNarration(m.id) }
         } else if !item.isFullyNarrated {
-            pill(item.narrated > 0 ? "Continue" : "Narrate") { store.narrate(m.id) }.disabled(store.kokoro != .ready)
-                .help(store.kokoro == .ready ? "Narrate this book with the selected voice" : "Install the voice engine first (banner above)")
+            pill(item.narrated > 0 ? "Continue" : "Narrate") { store.narrate(m.id) }.disabled(store.voiceEngine != .ready)
+                .help(store.voiceEngine == .ready ? "Narrate this book with the selected voice" : "Install the voice engine first (banner above)")
         }
     }
 
@@ -413,8 +413,8 @@ public struct StudioWindowView: View {
                 .accessibilityLabel("\(voiceName(v)), \(voiceNote(v))")
                 .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
                 TextLinkButton(store.previewing == v ? "Playing…" : "▶ Preview", size: 12) { store.preview(v) }
-                    .disabled(store.kokoro != .ready || store.previewing != nil)
-                    .help(store.kokoro == .ready ? "Hear this voice" : "Install the voice engine first")
+                    .disabled(store.voiceEngine != .ready || store.previewing != nil)
+                    .help(store.voiceEngine == .ready ? "Hear this voice" : "Install the voice engine first")
                     .accessibilityLabel(store.previewing == v ? "Playing \(voiceName(v))" : "Preview \(voiceName(v))")
             }
             Hairline()
@@ -423,9 +423,9 @@ public struct StudioWindowView: View {
 
     func voiceName(_ v: String) -> String { Imprint.voiceName(v) }
     func voiceNote(_ v: String) -> String {
-        let accent = v.hasPrefix("e") ? "Spanish" : v.hasPrefix("b") ? "British" : "American"
+        let accent = v.hasPrefix("e") ? "Spanish" : v.hasPrefix("f") ? "French" : v.hasPrefix("h") ? "Hindi" : v.hasPrefix("b") ? "British" : "American"
         let gender = v.dropFirst().first == "m" ? "male" : "female"
-        return "\(accent) · \(gender)\(v == "af_heart" || v == "ef_dora" ? " · recommended" : "")"
+        return "\(accent) · \(gender)\(v == "af_heart" ? " · recommended" : "")"
     }
 
     func chapterRow(_ c: ChapterInfo, _ r: StudioStore.RenderState?, queued: Bool) -> some View {

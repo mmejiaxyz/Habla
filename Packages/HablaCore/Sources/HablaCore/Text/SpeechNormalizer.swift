@@ -19,7 +19,7 @@ public struct SpeechNormalizer {
         s = s.replacingOccurrences(of: "\u{00A0}", with: " ")
         s = s.replacingOccurrences(of: "[\u{00AD}\u{200B}\u{2060}\u{FEFF}]", with: "", options: .regularExpression)
 
-        // Dashes become pauses; Kokoro otherwise tends to rush through them.
+        // Dashes become pauses; the voice otherwise tends to rush through them.
         s = replace(s, #"\s*[—―]\s*"#, ", ")
         s = replace(s, #"\s+–\s+"#, ", ")
         s = replace(s, #"(\d)–(\d)"#, "$1 to $2")

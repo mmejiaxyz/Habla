@@ -1,14 +1,14 @@
 import Foundation
 import NaturalLanguage
 
-/// The languages Habla reads, and which of them Kokoro can narrate.
+/// The languages Habla reads, and which of them Paradee can narrate.
 ///
 /// Reading works for all of them (text, layout, hyphenation, Find, dictionary, translate).
-/// Narration needs a Kokoro voice: English and Spanish have voices; German, Russian and
-/// Ukrainian don't (yet), so those books are text-only instead of being read with the wrong
+/// Narration needs a Paradee voice: English, Spanish, French and Hindi have one. Other
+/// languages (German, Russian, Ukrainian…) are read-only instead of being read with the wrong
 /// accent.
 public enum BookLanguage {
-    public static let supported = ["en", "es", "de", "ru", "uk"]
+    public static let supported = ["en", "es", "fr", "de", "ru", "uk", "hi"]
 
     /// "en-US" → "en", "ukr" → "uk", "spa" → "es", "deu"/"ger" → "de", "rus" → "ru".
     public static func normalize(_ code: String?) -> String? {
@@ -38,26 +38,30 @@ public enum BookLanguage {
         return declaredCode ?? "en"
     }
 
-    /// Kokoro has voices for this language.
-    public static func hasVoice(_ lang: String) -> Bool { ["en", "es"].contains(normalize(lang) ?? lang) }
+    /// Paradee has a voice for this language.
+    public static func hasVoice(_ lang: String) -> Bool { ["en", "es", "fr", "hi"].contains(normalize(lang) ?? lang) }
 
     /// Voices offered for a book in this language (first is the default).
     public static func voices(for lang: String) -> [String] {
         switch normalize(lang) {
-        case "es": return ["ef_dora", "em_alex", "em_santa"]
-        default: return ["af_heart", "af_bella", "af_nicole", "af_sarah", "am_michael", "am_fenrir",
-                         "bf_emma", "bf_isabella", "bm_george", "bm_fable"]
+        case "es": return ["em_alex"]
+        case "fr": return ["ff_siwis"]
+        case "hi": return ["hf_alpha", "hm_omega"]
+        default: return ["af_heart", "am_puck", "bf_isabella", "bm_fable"]
         }
     }
 
     public static func defaultVoice(for lang: String) -> String { voices(for: lang)[0] }
 
-    /// Does this voice speak this language? (Kokoro voice ids start with a language letter.)
-    public static func voice(_ id: String, speaks lang: String) -> Bool {
-        switch normalize(lang) {
-        case "es": return id.hasPrefix("e")
-        default: return id.hasPrefix("a") || id.hasPrefix("b")
-        }
+    /// Does this voice speak this language? (Voice ids start with a language letter.)
+    public static func voice(_ id: String, speaks lang: String) -> Bool { voices(for: lang).contains(id) }
+
+    /// The closest available voice to one chosen earlier (e.g. a Kokoro voice Paradee doesn't have):
+    /// same accent and gender when possible, else the language's default.
+    public static func closestVoice(to id: String, for lang: String) -> String {
+        let available = voices(for: lang)
+        if available.contains(id) { return id }
+        return available.first { $0.prefix(2) == id.prefix(2) } ?? defaultVoice(for: lang)
     }
 
     /// Word used for numbered chapters in this language.
@@ -67,6 +71,7 @@ public enum BookLanguage {
         case "de": return "Kapitel"
         case "ru": return "Глава"
         case "uk": return "Розділ"
+        case "fr": return "Chapitre"
         default: return "Chapter"
         }
     }
@@ -81,7 +86,7 @@ public enum BookLanguage {
         }
     }
 
-    /// English name, for messages ("Kokoro has no German voice yet").
+    /// English name, for messages ("No German voice yet").
     public static func name(_ lang: String) -> String {
         let code = normalize(lang) ?? lang
         return Locale(identifier: "en").localizedString(forLanguageCode: code) ?? code

@@ -12,18 +12,17 @@ final class UserTestingRegressionTests: XCTestCase {
         let python = dir.appendingPathComponent("python")
         try "#!/bin/sh\necho 'loading forever' >&2\nsleep 60\n".write(to: python, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: python.path)
-        for f in ["worker.py", "model.onnx", "voices.bin"] { FileManager.default.createFile(atPath: dir.appendingPathComponent(f).path, contents: Data()) }
-        let engine = KokoroEngine(configuration: .init(python: python, worker: dir.appendingPathComponent("worker.py"),
-                                                       model: dir.appendingPathComponent("model.onnx"),
-                                                       voicesFile: dir.appendingPathComponent("voices.bin")))
-        let old = KokoroEngine.startTimeout
-        KokoroEngine.startTimeout = 1.5
-        defer { KokoroEngine.startTimeout = old }
+        FileManager.default.createFile(atPath: dir.appendingPathComponent("worker.py").path, contents: Data())
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("hf"), withIntermediateDirectories: true)
+        let engine = VoiceEngine(configuration: .init(python: python, worker: dir.appendingPathComponent("worker.py"), home: dir.appendingPathComponent("hf")))
+        let old = VoiceEngine.startTimeout
+        VoiceEngine.startTimeout = 1.5
+        defer { VoiceEngine.startTimeout = old }
         let t0 = Date()
-        do { _ = try await engine.synthesize("Hello.", voice: VoiceInfo(engine: "kokoro", voiceID: "af_heart")); XCTFail("should fail") }
+        do { _ = try await engine.synthesize("Hello.", voice: VoiceInfo(engine: "paradee", voiceID: "af_heart")); XCTFail("should fail") }
         catch { XCTAssertLessThan(Date().timeIntervalSince(t0), 10, "gave up in time") }
         // The log keeps what the worker said (and isn't wiped by a restart).
-        do { _ = try await engine.synthesize("Again.", voice: VoiceInfo(engine: "kokoro", voiceID: "af_heart")) } catch {}
+        do { _ = try await engine.synthesize("Again.", voice: VoiceInfo(engine: "paradee", voiceID: "af_heart")) } catch {}
         let log = try String(contentsOf: dir.appendingPathComponent("worker.log"), encoding: .utf8)
         XCTAssertEqual(log.components(separatedBy: "loading forever").count - 1, 2, log)
         await engine.shutdown()
@@ -31,10 +30,10 @@ final class UserTestingRegressionTests: XCTestCase {
 
     func testWorkerCountFollowsModelAndMemory() {
         let gb: UInt64 = 1_073_741_824
-        XCTAssertEqual(EnginePool.recommendedWorkers(fastModel: true, memoryBytes: 8 * gb, cores: 8), 2, "fast model: ~0.3 GB per worker")
-        XCTAssertEqual(EnginePool.recommendedWorkers(fastModel: false, memoryBytes: 8 * gb, cores: 8), 1, "full model on 8 GB: one")
-        XCTAssertEqual(EnginePool.recommendedWorkers(fastModel: false, memoryBytes: 16 * gb, cores: 12), 2)
-        XCTAssertEqual(EnginePool.recommendedWorkers(fastModel: true, memoryBytes: 16 * gb, cores: 4), 1)
+        XCTAssertEqual(EnginePool.recommendedWorkers(memoryBytes: 8 * gb, cores: 8), 3, "M1 Air 8 GB: three Paradee workers")
+        XCTAssertEqual(EnginePool.recommendedWorkers(memoryBytes: 16 * gb, cores: 8), 4)
+        XCTAssertEqual(EnginePool.recommendedWorkers(memoryBytes: 18 * gb, cores: 11), 4, "never more than four (no gain past four)")
+        XCTAssertEqual(EnginePool.recommendedWorkers(memoryBytes: 8 * gb, cores: 2), 1)
     }
 
     /// Sentences with nothing to say still get a timing, so audio and text stay aligned.

@@ -1,7 +1,7 @@
 # Habla
 
 EPUB → natural audiobook + Apple Books–style reader, synced between your Mac and iPhone.
-The Mac does the heavy work (Kokoro narration); the iPhone app is under 1 MB and only plays and reads.
+The Mac does the heavy work (narration with Paradee, a small voice model distilled from Kokoro); the iPhone app is under 1 MB and only plays and reads.
 
 ## Get started
 
@@ -10,8 +10,8 @@ Scripts/build.sh          # → dist/Habla.app (Mac) and dist/Habla.ipa (iPhone)
 ```
 
 1. **Mac** — open Habla (move it to Applications so it can update itself). First run: click
-   **Install** in the banner (Kokoro voice engine, ~350 MB, once). Drop EPUB files on the window;
-   narration starts by itself (~13× real time on an M3 Pro, using the fast int8 Kokoro model and two workers). Habla opens at login and keeps working
+   **Install** in the banner (Paradee voice engine, ~250 MB, once). Drop EPUB files on the window;
+   narration starts by itself (~90× real time on an M3 Pro with four Paradee workers: a 10-hour book in about 7 minutes). Habla opens at login and keeps working
    with its window closed: it serves the iPhone, imports books the iPhone sends, and narrates them.
    The Mac stays awake while narrating. *Habla → Open at Login* turns that off.
 2. **iPhone** — install `Habla.ipa` with AltStore. Open it on the same Wi-Fi: it finds the Mac by
@@ -25,11 +25,11 @@ Scripts/build.sh          # → dist/Habla.app (Mac) and dist/Habla.ipa (iPhone)
 
 ## Languages
 
-Books in **English, Spanish, German, Russian and Ukrainian** read fully: layout and hyphenation
-follow the book's language (detected from the text, even when the EPUB says otherwise), and Find,
-the dictionary and translation work in all of them. **Narration** needs a Kokoro voice: English and
-Spanish have voices (Spanish: Dora, Alex, Santa); German, Russian and Ukrainian books are
-text-only until Kokoro adds voices for them.
+Books in **English, Spanish, German, Russian, Ukrainian** (and French, Hindi) read fully: layout and
+hyphenation follow the book's language (detected from the text, even when the EPUB says otherwise),
+and Find, the dictionary and translation work in all of them. **Narration** uses Paradee's voices:
+English (Heart, Puck, Isabella, Fable), Spanish (Alex), French (Siwis) and Hindi (Alpha, Omega).
+Books in other languages (German, Russian, Ukrainian…) are read-only.
 
 ## Updates
 
@@ -51,12 +51,12 @@ Listening and reading share one position: *Read along* opens the page being spok
 ## Layout
 
 ```
-Packages/HablaCore   Core (no third-party deps): EPUB → bundle, Kokoro rendering, Mac⇄iPhone sync,
+Packages/HablaCore   Core (no third-party deps): EPUB → bundle, voice rendering (Paradee), Mac⇄iPhone sync,
                      KOReader/CrossPoint sync, OPDS, Xteink delivery. CLI: `habla`.
 Packages/HablaUI     App layer: design system, TextKit page engine (justified + hyphenated), narration
                      player, iPhone screens, Studio screens, stores. `habla-snapshots` renders screens.
 Apps/                Xcode project (xcodegen): Habla (iOS 17+), HablaStudio (macOS 14+)
-Tools/kokoro         Kokoro worker + installer (bundled into the Mac app)
+Tools/voice          Paradee voice worker + installer (bundled into the Mac app)
 Docs/                Xteink/CrossPoint protocol notes (verified against the firmware source)
 Design/Snapshots     Rendered screens (sheet-phone.png, sheet-mac.png)
 ```

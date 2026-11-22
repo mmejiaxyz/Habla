@@ -240,8 +240,7 @@ final class AppFlowTests: XCTestCase {
         let m = try b.manifest()
         XCTAssertEqual(m.narrationModels, ["tone"])
         XCTAssertTrue(Imprint.lines(m).first?.hasPrefix("Narrated with tone") == true, Imprint.lines(m).joined(separator: " | "))
-        XCTAssertEqual(KokoroEngine.describe(modelFile: "kokoro-v1.0.int8.onnx"), "Kokoro v1.0 · fast (int8)")
-        XCTAssertEqual(KokoroEngine.describe(modelFile: "kokoro-v1.0.onnx"), "Kokoro v1.0 · full")
+        XCTAssertEqual(VoiceEngine(configuration: .init(toolsDirectory: temp())).modelDescription, "Paradee 1.3")
     }
 
     func testReaderNeverLosesThePlace() throws {

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Several identical engines (e.g. two Kokoro workers) behind one `TTSEngine`: each request
+/// Several identical engines (e.g. four Paradee workers) behind one `TTSEngine`: each request
 /// goes to a free engine, so sentences are voiced in parallel on multi-core Macs.
 /// Every engine must produce identical audio (same model), so the sentence cache stays valid.
 public actor EnginePool: TTSEngine {
@@ -49,15 +49,12 @@ public actor EnginePool: TTSEngine {
         if waiters.isEmpty { free.append(i) } else { waiters.removeFirst().resume(returning: i) }
     }
 
-    /// Sensible worker count for this Mac. Each worker keeps the model loaded: about 0.3 GB
-    /// with the fast (int8) model, over 1 GB with the full one. Two need 8+ cores, and 8 GB of
-    /// memory with the fast model or 12 GB with the full one.
-    public static func recommendedWorkers(fastModel: Bool = true,
-                                          memoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+    /// Paradee workers for this Mac: each uses one CPU thread and about 0.45 GB of memory.
+    /// Four saturate an M-series Mac (measured: 4 ≈ 130× real time, 8 ≈ 140×); fewer on small Macs.
+    public static func recommendedWorkers(memoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
                                           cores: Int = ProcessInfo.processInfo.activeProcessorCount) -> Int {
         let memoryGB = Double(memoryBytes) / 1_073_741_824
-        guard cores >= 8 else { return 1 }
-        return memoryGB >= (fastModel ? 7.5 : 11.5) ? 2 : 1
+        let byMemory = memoryGB >= 11.5 ? 4 : memoryGB >= 7.5 ? 3 : 2
+        return max(1, min(byMemory, cores / 2))
     }
-
 }

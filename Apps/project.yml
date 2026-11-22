@@ -54,9 +54,9 @@ targets:
     platform: macOS
     sources:
       - HablaStudio
-      - path: ../Tools/kokoro/install.sh
+      - path: ../Tools/voice/install.sh
         buildPhase: resources
-      - path: ../Tools/kokoro/kokoro_worker.py
+      - path: ../Tools/voice/paradee_worker.py
         buildPhase: resources
     dependencies:
       - package: HablaUI

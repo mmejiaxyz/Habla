@@ -3,7 +3,7 @@ import NaturalLanguage
 
 /// Splits block text into sentences (the unit for narration, highlighting and positions).
 public struct SentenceSegmenter {
-    /// Kokoro sounds best below ~400 characters per request.
+    /// The voice sounds best below ~400 characters per request.
     public var maxLength = 320
     /// Fragments shorter than this ("Oh!", "Yes.") are merged with the next one
     /// so they get natural intonation instead of sounding clipped.

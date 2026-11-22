@@ -1,37 +1,30 @@
 #if os(macOS)
 import Foundation
 
-/// Kokoro-82M via a long-running Python worker (`Tools/kokoro/kokoro_worker.py`).
-/// The worker starts on first use and keeps the model loaded until `shutdown()`.
-public actor KokoroEngine: TTSEngine {
-    public nonisolated let name = "kokoro"
-    /// Cached audio is only reused for the same model file (the int8 model sounds a little different).
-    public nonisolated let cacheVersion: String
-    public nonisolated let modelDescription: String
+/// Habla's voice: Paradee (an 8M-parameter model distilled from Kokoro) in a long-running
+/// Python worker (`Tools/voice/paradee_worker.py`). The worker loads the model once and keeps it
+/// until `shutdown()`. One thread per worker: Habla runs several workers in an `EnginePool`.
+public actor VoiceEngine: TTSEngine {
+    public nonisolated let name = "paradee"
+    /// Cached sentences are only reused for the same engine and version.
+    public nonisolated let cacheVersion = "paradee-1.3"
+    public nonisolated let modelDescription = "Paradee 1.3"
 
     public struct Configuration: Sendable {
         public var python: URL
         public var worker: URL
-        public var model: URL
-        public var voicesFile: URL
-        public var language = "en-us"
+        /// Where the model lives (HF_HOME); nothing is downloaded at run time.
+        public var home: URL
 
-        public init(python: URL, worker: URL, model: URL, voicesFile: URL) {
-            self.python = python; self.worker = worker; self.model = model; self.voicesFile = voicesFile
+        public init(python: URL, worker: URL, home: URL) {
+            self.python = python; self.worker = worker; self.home = home
         }
 
-        /// The quantized model: about twice as fast on the CPU, a third of the size.
-        public static let fastModel = "kokoro-v1.0.int8.onnx"
-        public static let fullModel = "kokoro-v1.0.onnx"
-
-        /// Layout produced by `Tools/kokoro/install.sh`. Uses the fast model when it's there.
+        /// Layout produced by `Tools/voice/install.sh`.
         public init(toolsDirectory dir: URL) {
-            let models = dir.appendingPathComponent("models", isDirectory: true)
-            let fast = models.appendingPathComponent(Self.fastModel)
             self.init(python: dir.appendingPathComponent(".venv/bin/python"),
-                      worker: dir.appendingPathComponent("kokoro_worker.py"),
-                      model: FileManager.default.fileExists(atPath: fast.path) ? fast : models.appendingPathComponent(Self.fullModel),
-                      voicesFile: models.appendingPathComponent("voices-v1.0.bin"))
+                      worker: dir.appendingPathComponent("paradee_worker.py"),
+                      home: dir.appendingPathComponent("hf", isDirectory: true))
         }
     }
 
@@ -44,10 +37,7 @@ public actor KokoroEngine: TTSEngine {
 
     public init(configuration: Configuration) {
         config = configuration
-        let model = configuration.model.deletingPathExtension().lastPathComponent   // "kokoro-v1.0"
-        cacheVersion = model == "kokoro-v1.0" ? "kokoro-v1.0-onnx" : "\(model)-onnx"
-        modelDescription = Self.describe(modelFile: configuration.model.lastPathComponent)
-        scratch = FileManager.default.temporaryDirectory.appendingPathComponent("habla-kokoro-\(UUID().uuidString)")
+        scratch = FileManager.default.temporaryDirectory.appendingPathComponent("habla-voice-\(UUID().uuidString)")
     }
 
     public func voices() async throws -> [String] {
@@ -74,12 +64,11 @@ public actor KokoroEngine: TTSEngine {
         let out = scratch.appendingPathComponent("\(UUID().uuidString).f32")
         defer { try? FileManager.default.removeItem(at: out) }
 
-        let request: [String: Any] = ["text": text, "voice": voice.voiceID, "speed": voice.speed,
-                                      "lang": Self.language(for: voice.voiceID, default: config.language), "out": out.path]
+        let request: [String: Any] = ["text": text, "voice": voice.voiceID, "speed": voice.speed, "out": out.path]
         var line = try JSONSerialization.data(withJSONObject: request)
         line.append(0x0A)
         do { try stdin?.write(contentsOf: line) }
-        catch { await shutdown(); throw TTSError.synthesisFailed("Kokoro worker stopped") }
+        catch { await shutdown(); throw TTSError.synthesisFailed("voice worker stopped") }
 
         // Watchdog: a worker that hangs is killed, which ends the wait below.
         let proc = process
@@ -90,7 +79,7 @@ public actor KokoroEngine: TTSEngine {
         defer { watchdog.cancel() }
         guard let reply = try await nextMessage() else {
             await shutdown()
-            throw TTSError.synthesisFailed("Kokoro worker exited")
+            throw TTSError.synthesisFailed("voice worker exited")
         }
         guard reply["ok"] as? Bool == true else {
             throw TTSError.synthesisFailed(reply["error"] as? String ?? "unknown error")
@@ -99,29 +88,6 @@ public actor KokoroEngine: TTSEngine {
         let data = try Data(contentsOf: out)
         let samples = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         return SpeechAudio(samples: samples, sampleRate: rate)
-    }
-
-    /// Kokoro voice ids start with a language letter: a = American, b = British English.
-    /// "kokoro-v1.0.int8.onnx" → "Kokoro v1.0 · fast (int8)"; "kokoro-v1.0.onnx" → "Kokoro v1.0 · full".
-    public static func describe(modelFile: String) -> String {
-        var name = modelFile.hasSuffix(".onnx") ? String(modelFile.dropLast(5)) : modelFile
-        var variant: String?
-        for v in ["int8", "fp16"] where name.hasSuffix("." + v) { variant = v; name = String(name.dropLast(v.count + 1)) }
-        let base = name.replacingOccurrences(of: "kokoro-", with: "Kokoro ")
-        switch variant {
-        case "int8": return "\(base) · fast (int8)"
-        case let v?: return "\(base) · \(v)"
-        case nil: return "\(base) · full"
-        }
-    }
-
-    static func language(for voiceID: String, default fallback: String) -> String {
-        switch voiceID.first {
-        case "a": return "en-us"
-        case "b": return "en-gb"
-        case "e": return "es"
-        default: return fallback
-        }
     }
 
     public func shutdown() async {
@@ -138,16 +104,17 @@ public actor KokoroEngine: TTSEngine {
         if process?.isRunning == true { return }
         signal(SIGPIPE, SIG_IGN)   // a dead worker must not take the app down with it
         let fm = FileManager.default
-        for (label, url) in [("Python env", config.python), ("worker", config.worker),
-                             ("model", config.model), ("voices", config.voicesFile)]
+        for (label, url) in [("Python environment", config.python), ("worker", config.worker), ("voice model", config.home)]
         where !fm.fileExists(atPath: url.path) {
-            throw TTSError.engineUnavailable("\(label) missing at \(url.path) — run Tools/kokoro/setup.sh")
+            throw TTSError.engineUnavailable("The voice engine isn't installed (\(label) missing). Install it from Habla on your Mac.")
         }
         try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
 
         let p = Process()
         p.executableURL = config.python
-        p.arguments = ["-I", config.worker.path, "--model", config.model.path, "--voices", config.voicesFile.path]
+        p.arguments = ["-I", config.worker.path]
+        p.environment = ["HF_HOME": config.home.path, "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1",
+                         "HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe
         p.standardOutput = outPipe

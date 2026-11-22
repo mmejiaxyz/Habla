@@ -133,7 +133,7 @@ public struct BookImporter {
         }
 
         // The book's language decides sentence splitting, narration text, chapter names, and
-        // whether Kokoro can narrate it at all.
+        // whether Paradee can narrate it at all.
         let sample = drafts.filter { !$0.frontMatter }.flatMap(\.blocks).prefix(80).map(\.text).joined(separator: " ")
         let language = BookLanguage.detect(declared: package.language, sample: sample)
         let narratable = BookLanguage.hasVoice(language)
