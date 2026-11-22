@@ -13,3 +13,4 @@ dist/
 Apps/Habla.xcodeproj/
 .swiftpm/
 *.part
+Tools/kokoro/worker.log
