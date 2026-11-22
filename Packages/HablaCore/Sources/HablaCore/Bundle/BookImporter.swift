@@ -30,6 +30,9 @@ public struct BookImporter {
     static let frontMatterTitles = [
         "copyright", "contents", "table of contents", "title page", "also by", "other books by",
         "books by", "imprint", "colophon", "uncopyright", "front matter",
+        // Spanish, German, Russian, Ukrainian
+        "índice", "indice", "contenido", "créditos", "derechos", "inhalt", "inhaltsverzeichnis", "impressum",
+        "содержание", "оглавление", "выходные данные", "зміст", "вихідні дані",
     ]
 
     /// The file name Habla gives an EPUB it sends to an e-reader (stable, so CrossPoint's
@@ -70,6 +73,8 @@ public struct BookImporter {
             var spineIndex: Int; var href: String; var words: Int
             /// Front matter only because it's short and untitled (a guess, not a declaration).
             var guessedFront = false
+            /// Habla made the title up ("Chapter 3"): it gets translated into the book's language.
+            var generatedNumber: Int? = nil
         }
         var drafts: [Draft] = []
         var untitledCount = 0
@@ -104,13 +109,15 @@ public struct BookImporter {
                 || title.map { t in Self.frontMatterTitles.contains { t.lowercased().hasPrefix($0) } } == true
             // Declared front matter (by the book itself), as opposed to a guess from length.
             let declared = isFront || title.map { t in Self.frontMatterTitles.contains { t.lowercased().hasPrefix($0) } } == true
+            var generated: Int?
             if title == nil {
                 untitledCount += front ? 0 : 1
                 title = front ? "Front matter" : "Chapter \(untitledCount)"
+                if !front { generated = untitledCount }
             }
             drafts.append(Draft(title: title!, blocks: result.blocks, frontMatter: front,
                                 spineIndex: spineItem.index, href: item.href, words: words,
-                                guessedFront: front && !declared))
+                                guessedFront: front && !declared, generatedNumber: generated))
         }
 
         guard drafts.contains(where: { $0.words > 0 }) else { throw EPUBError.noText }
@@ -122,6 +129,27 @@ public struct BookImporter {
                 n += 1
                 drafts[i].frontMatter = false
                 drafts[i].title = drafts.filter(\.guessedFront).count == 1 ? package.title : "Part \(n)"
+            }
+        }
+
+        // The book's language decides sentence splitting, narration text, chapter names, and
+        // whether Kokoro can narrate it at all.
+        let sample = drafts.filter { !$0.frontMatter }.flatMap(\.blocks).prefix(80).map(\.text).joined(separator: " ")
+        let language = BookLanguage.detect(declared: package.language, sample: sample)
+        let narratable = BookLanguage.hasVoice(language)
+        var segmenter = self.segmenter; segmenter.language = language
+        var normalizer = self.normalizer; normalizer.language = language
+        let chapterWord = BookLanguage.chapterWord(language)
+        for i in drafts.indices {
+            if let n = drafts[i].generatedNumber { drafts[i].title = "\(chapterWord) \(n)" }
+            else if drafts[i].title.hasPrefix("Part "), drafts[i].guessedFront, let n = Int(drafts[i].title.dropFirst(5)) {
+                drafts[i].title = "\(BookLanguage.partWord(language)) \(n)"
+            } else if language != "en", !drafts[i].frontMatter {
+                // A heading that is only a number ("IV", "12.") names the chapter.
+                let core = drafts[i].title.trimmingCharacters(in: CharacterSet(charactersIn: " .:"))
+                if !core.isEmpty, core.count <= 8, core.allSatisfy({ "IVXLCDMivxlcdm".contains($0) }) || core.allSatisfy(\.isNumber) {
+                    drafts[i].title = "\(chapterWord) \(core.uppercased())"
+                }
             }
         }
 
@@ -148,7 +176,7 @@ public struct BookImporter {
                 index: i, title: draft.title, textFile: BookBundle.textPath(i), audioFile: nil, timingFile: nil,
                 sentenceCount: nextID, wordCount: words, duration: nil, isFrontMatter: draft.frontMatter,
                 spineIndex: draft.spineIndex, href: draft.href,
-                audioStatus: draft.frontMatter && !narrateFrontMatter ? .skipped : .pending))
+                audioStatus: !narratable || (draft.frontMatter && !narrateFrontMatter) ? .skipped : .pending))
         }
 
         // Cover + accent.
@@ -173,7 +201,7 @@ public struct BookImporter {
 
         let now = Date()
         let manifest = BookManifest(
-            id: id, title: package.title, author: package.author, language: package.language,
+            id: id, title: package.title, author: package.author, language: language,
             publisher: package.publisher, summary: package.summary,
             sourceFileName: epubURL.lastPathComponent,
             koreaderDigest: try DocumentDigest.koreaderPartialMD5(of: epubURL),

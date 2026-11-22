@@ -115,7 +115,10 @@ do {
 
     case "render":
         guard args.first != nil else { fail("usage: habla render <id> [--voice v] [--speed s] [--chapters 1,2]") }
-        let voiceID = option("voice") ?? "af_heart"
+        let renderBook = BookBundle(url: BookBundle.url(for: args[0], in: library))
+        let bookLanguage = (try? renderBook.manifest().language) ?? "en"
+        guard BookLanguage.hasVoice(bookLanguage) else { fail("Kokoro has no \(BookLanguage.name(bookLanguage)) voice yet: this book is text-only.") }
+        let voiceID = option("voice") ?? BookLanguage.defaultVoice(for: bookLanguage)
         let speed = Double(option("speed") ?? "1.0") ?? 1.0
         let only = option("chapters").map { Set($0.split(separator: ",").compactMap { Int($0) }) }
         let engineName = option("engine") ?? "kokoro"

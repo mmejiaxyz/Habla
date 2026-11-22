@@ -218,6 +218,9 @@ public struct SentenceTiming: Codable, Equatable, Sendable {
 }
 
 public extension BookManifest {
+    /// Kokoro can narrate this book's language (English, Spanish). Others are text-only.
+    var canNarrate: Bool { BookLanguage.hasVoice(language) }
+
     /// The imprint: which voice models narrated this book (usually one; two if the model
     /// changed while it was being narrated). Older bundles don't record it.
     var narrationModels: [String] {

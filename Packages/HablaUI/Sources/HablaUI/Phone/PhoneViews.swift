@@ -97,7 +97,7 @@ public struct PhoneLibraryView: View {
         .onTapGesture { open(.book(b.id)) }
         // VoiceOver: one button that opens the book; listening is an action on it.
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(b.title), \(b.author). \(heroStatus(b))")
+        .accessibilityLabel("\(b.title), \(b.author). \(heroStatus(b).replacingOccurrences(of: "/", with: " of "))")
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Opens the book")
         .accessibilityAction { open(.book(b.id)) }
@@ -110,9 +110,10 @@ public struct PhoneLibraryView: View {
     }
 
     func heroStatus(_ b: BookItem) -> String {
-        if store.isWaitingForMac(b.id) { return "Readable now · narration starts when your Mac is on" }
+        if store.isWaitingForMac(b.id) { return b.isTextOnly ? "Readable now · sending to your Mac" : "Readable now · narration starts when your Mac is on" }
         var parts = [!b.isStarted ? "Not started" : b.progress < 0.01 ? "Just started" : "\(Int((b.progress * 100).rounded()))%"]
-        if !b.isFullyNarrated { parts.append("narrating \(b.narrated) of \(b.narratable)") }
+        if b.isTextOnly { parts.append("text only") }
+        else if !b.isFullyNarrated { parts.append("narrating \(b.narrated)/\(b.narratable)") }
         else if let m = b.minutesLeft { parts.append("\(Format.duration(Double(m) * 60)) left") }
         return parts.joined(separator: " · ")
     }
@@ -156,7 +157,8 @@ public struct PhoneLibraryView: View {
                 Circle().strokeBorder(Theme.accentText, lineWidth: 1).frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(b.title).font(Theme.display(22)).foregroundStyle(Theme.text).lineLimit(1)
-                    Text(b.isFullyNarrated ? b.author : "\(b.author) · narrating \(b.narrated) of \(b.narratable)")
+                    Text(b.isFullyNarrated ? b.author : b.isTextOnly ? "\(b.author) · text only" : "\(b.author) · narrating \(b.narrated)/\(b.narratable)")
+                        .accessibilityLabel(b.isFullyNarrated ? b.author : b.isTextOnly ? "\(b.author), text only" : "\(b.author), \(b.narrated) of \(b.narratable) chapters narrated")
                         .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).lineLimit(1)
                 }
                 Spacer(minLength: 8)
@@ -323,7 +325,8 @@ public struct PhoneBookView: View {
         let chapters = b.chapters.filter { !$0.isFrontMatter }.count
         if chapters > 0 { parts.append("\(chapters) chapters") }
         if b.duration > 0 { parts.append(Format.duration(b.duration)) }
-        if !b.isFullyNarrated { parts.append("narrating \(b.narrated) of \(b.narratable)") }
+        if b.isTextOnly { parts.append("text only") }
+        else if !b.isFullyNarrated { parts.append("narrating \(b.narrated) of \(b.narratable)") }
         return parts.joined(separator: " · ")
     }
 

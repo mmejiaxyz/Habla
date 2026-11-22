@@ -26,6 +26,8 @@ public struct LibraryEntry: Codable, Equatable, Identifiable, Sendable {
     public var readyChapters: Int
     public var totalDuration: TimeInterval
     public var totalBytes: Int
+    /// Book language (nil from older Macs).
+    public var language: String?
 
     public init(manifest m: BookManifest) {
         id = m.id; title = m.title; author = m.author; accentColor = m.accentColor; revision = m.revision
@@ -33,5 +35,6 @@ public struct LibraryEntry: Codable, Equatable, Identifiable, Sendable {
         readyChapters = m.chapters.filter { $0.audioStatus == .ready }.count
         totalDuration = m.totalDuration
         totalBytes = m.files.reduce(0) { $0 + $1.size }
+        language = m.language
     }
 }

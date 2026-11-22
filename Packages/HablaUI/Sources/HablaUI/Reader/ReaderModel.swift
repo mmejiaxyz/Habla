@@ -101,7 +101,7 @@ public final class ReaderModel: ObservableObject {
             layout = nil; loadError = "This chapter couldn't be opened."
             return
         }
-        let l = PageLayout(chapter: Typesetter.set(text, style: style), pageSize: pageSize)
+        let l = PageLayout(chapter: Typesetter.set(text, style: style, language: manifest.language), pageSize: pageSize)
         loadError = nil
         layout = l
         var p = anchor.flatMap { l.page(forSentence: $0) } ?? min(page, l.pageCount - 1)

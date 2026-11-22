@@ -12,6 +12,7 @@ let fixture = URL(fileURLWithPath: args[1]), out = URL(fileURLWithPath: args[2])
 let fm = FileManager.default
 try? fm.createDirectory(at: out, withIntermediateDirectories: true)
 let phone = CGSize(width: 390, height: 844)
+let languagesMode = args.count >= 4 && args[3] == "--languages"
 
 @MainActor func render<V: View>(_ name: String, _ view: V, size: CGSize = phone, scale: CGFloat = 3, dark: Bool = false) {
     let r = ImageRenderer(content: view.frame(width: size.width, height: size.height)
@@ -28,6 +29,25 @@ let phone = CGSize(width: 390, height: 844)
     try! fm.createDirectory(at: lib, withIntermediateDirectories: true)
     for b in books { try! fm.copyItem(at: b, to: lib.appendingPathComponent(b.lastPathComponent)) }
     return root
+}
+
+/// `--languages`: one reader page, book page and library for every book in the library.
+@MainActor func runLanguages() {
+    let bundles = try! fm.contentsOfDirectory(at: fixture, includingPropertiesForKeys: nil).filter { $0.pathExtension == "habla" }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    let root = makeRoot("langs", books: bundles)
+    let store = PhoneStore(root: root)
+    store.previewState(remote: [], connection: .connected(name: "Habla on MacBook Pro", url: URL(string: "http://192.168.1.20:8787")!),
+                       lastSync: Date(), paired: .init(libraryID: "a", name: "Habla on MacBook Pro", fingerprint: ""))
+    render("lang-library", PhoneLibraryView(store: store, player: NarrationPlayer(), open: { _ in }))
+    for b in bundles {
+        let m = try! BookBundle(url: b).manifest()
+        let model = ReaderModel(bundle: BookBundle(url: b), manifest: m, chapter: m.chapters.first { !$0.isFrontMatter }!.index,
+                                sentence: nil, style: ReaderStyle())
+        model.setPageSize(CGSize(width: phone.width - 52, height: phone.height - 74 - 22))
+        render("lang-\(m.language)-reader", ReaderView(model: model, player: NarrationPlayer(), onClose: {}))
+        render("lang-\(m.language)-book", PhoneBookView(store: store, player: NarrationPlayer(), id: m.id, open: { _ in }, close: {}))
+    }
 }
 
 @MainActor func run() {
@@ -118,4 +138,4 @@ let phone = CGSize(width: 390, height: 844)
     render("m4-mac-reader", ReaderView(model: spread, player: player, onClose: {}), size: mac, scale: 2)
 }
 
-MainActor.assumeIsolated { run() }
+MainActor.assumeIsolated { languagesMode ? runLanguages() : run() }

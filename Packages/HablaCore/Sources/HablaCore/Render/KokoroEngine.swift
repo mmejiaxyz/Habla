@@ -119,6 +119,7 @@ public actor KokoroEngine: TTSEngine {
         switch voiceID.first {
         case "a": return "en-us"
         case "b": return "en-gb"
+        case "e": return "es"
         default: return fallback
         }
     }

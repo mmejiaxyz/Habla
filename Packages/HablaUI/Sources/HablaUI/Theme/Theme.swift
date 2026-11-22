@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Visual language from the C5 reference (ARCHI), softened: light paper screens framed by one
 /// light-blue accent, oversized Didone serif titles, staggered thin uppercase grotesk,
@@ -42,6 +45,18 @@ public enum Theme {
     public static let screenCorner: CGFloat = 40
     public static let margin: CGFloat = 28
     public static let section: CGFloat = 36
+}
+
+public extension Font {
+    /// A UI size that grows with the iPhone's text-size setting (Dynamic Type), and stays as
+    /// designed on the Mac (whose text styles are smaller than iOS's).
+    static func ui(_ size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default) -> Font {
+        #if canImport(UIKit)
+        return .system(size: UIFontMetrics.default.scaledValue(for: size), weight: weight, design: design)
+        #else
+        return .system(size: size, weight: weight, design: design)
+        #endif
+    }
 }
 
 public extension Color {

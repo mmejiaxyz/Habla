@@ -39,6 +39,7 @@ public struct ReaderView: View {
     @State private var showThemes = false
     @State private var showContents = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize   // read in body: re-render on change
     @State private var showFind = false
     @State private var findQuery = ""
     @State private var findHits: [FindHit] = []
@@ -95,6 +96,7 @@ public struct ReaderView: View {
     var bookHasAudio: Bool { model.manifest.chapters.contains { $0.audioStatus == .ready } }
 
     public var body: some View {
+        let _ = dynamicTypeSize
         ZStack {
             theme.background.ignoresSafeArea()
             GeometryReader { geo in
@@ -178,7 +180,7 @@ public struct ReaderView: View {
                 footer(width: size.width).offset(y: size.height - 16)
                     .opacity(findIndex != nil && !findHits.isEmpty ? 0 : 1)
             } else if let err = model.loadError {
-                Text(err).font(.system(.subheadline)).foregroundStyle(theme.secondary).padding(.top, 120)
+                Text(err).font(.ui(15)).foregroundStyle(theme.secondary).padding(.top, 120)
             }
         }
         .frame(width: size.width, height: size.height, alignment: .top)
@@ -276,7 +278,7 @@ public struct ReaderView: View {
                 Spacer()
             }
         }
-        .font(.system(.caption2)).monospacedDigit()
+        .font(.ui(11)).monospacedDigit()
         .foregroundStyle(theme.secondary)
         .frame(width: width)
     }
@@ -365,7 +367,7 @@ public struct ReaderView: View {
                 }
                 #if os(macOS)
                 if !sentenceScope, let d = definition {
-                    ScrollView { Text(d).font(.system(.footnote)).foregroundStyle(theme.text.opacity(0.8)).frame(maxWidth: .infinity, alignment: .leading) }
+                    ScrollView { Text(d).font(.ui(13)).foregroundStyle(theme.text.opacity(0.8)).frame(maxWidth: .infinity, alignment: .leading) }
                         .frame(maxHeight: 140)
                 }
                 #endif
@@ -405,7 +407,7 @@ public struct ReaderView: View {
 
     func scopeButton(_ title: String, sentence: Bool) -> some View {
         Button { withAnimation(.easeOut(duration: 0.15)) { sentenceScope = sentence } } label: {
-            Text(title).font(.system(.footnote, weight: .medium))
+            Text(title).font(.ui(13, weight: .medium))
                 .foregroundStyle(theme.text.opacity(sentenceScope == sentence ? 1 : 0.55))
                 .padding(.horizontal, 12).frame(height: 30)
                 .background(Capsule().fill(sentenceScope == sentence ? theme.background : .clear))
@@ -419,7 +421,7 @@ public struct ReaderView: View {
         Button(action: action) {
             VStack(spacing: 6) {
                 Image(systemName: symbol).font(.system(size: 18, weight: .medium))
-                Text(title).font(.system(.caption, weight: .medium))
+                Text(title).font(.ui(12, weight: .medium))
             }
             .foregroundStyle(theme.text)
             .frame(maxWidth: .infinity, minHeight: 62)
@@ -469,7 +471,7 @@ public struct ReaderView: View {
                 roundButton(isSpread ? "‹" : "×", label: "Close", action: onClose)
                 Spacer()
                 Text(isSpread ? model.manifest.title : model.chapterTitle)
-                    .font(.system(.footnote, weight: .semibold)).lineLimit(1)
+                    .font(.ui(13, weight: .semibold)).lineLimit(1)
                     .foregroundStyle(theme.text.opacity(0.75))
                 Spacer()
                 if narratingHere && !isSpread {
@@ -490,7 +492,7 @@ public struct ReaderView: View {
                     if bookHasAudio { listenButton }
                     Spacer(minLength: 0)
                     Text("Page \(model.page + 1) of \(model.pageCount) · \(Int((model.bookFraction * 100).rounded()))%")
-                        .font(.system(.caption)).monospacedDigit().foregroundStyle(theme.secondary).lineLimit(1)
+                        .font(.ui(12)).monospacedDigit().foregroundStyle(theme.secondary).lineLimit(1)
                     Spacer(minLength: 0)
                     roundButton("Aa", label: "Themes and size", serif: true) { showThemes = true }
                 }
@@ -505,8 +507,8 @@ public struct ReaderView: View {
         Button(action: listen) {
             HStack(spacing: 8) {
                 Image(systemName: narratingHere && player.isPlaying ? "pause.fill" : "headphones")
-                    .font(.system(.subheadline, weight: .semibold))
-                Text(narratingHere && player.isPlaying ? "Pause" : "Listen").font(.system(.subheadline, weight: .semibold))
+                    .font(.ui(14, weight: .semibold))
+                Text(narratingHere && player.isPlaying ? "Pause" : "Listen").font(.ui(14, weight: .semibold))
             }
             .foregroundStyle(Theme.ink)
             .padding(.horizontal, 16).frame(height: 44)
@@ -522,7 +524,7 @@ public struct ReaderView: View {
             Spacer()
             HStack {
                 Button { player.pause() } label: {
-                    Image(systemName: "pause.fill").font(.system(.footnote, weight: .semibold))
+                    Image(systemName: "pause.fill").font(.ui(13, weight: .semibold))
                         .foregroundStyle(theme.text.opacity(0.7))
                         .frame(width: 36, height: 36)
                         .background(Circle().fill(theme.control))
@@ -550,7 +552,7 @@ public struct ReaderView: View {
     func toastView(_ text: String) -> some View {
         VStack {
             Spacer()
-            Text(text).font(.system(.subheadline, weight: .medium)).multilineTextAlignment(.center)
+            Text(text).font(.ui(14, weight: .medium)).multilineTextAlignment(.center)
                 .foregroundStyle(theme.isDark ? Color.black : Color.white)
                 .padding(.horizontal, 18).padding(.vertical, 12)
                 .background(Capsule().fill(theme.isDark ? Color.white : Color.black).opacity(0.85))
@@ -561,7 +563,7 @@ public struct ReaderView: View {
 
     func symbolButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(.callout, weight: .medium))
+            Image(systemName: symbol).font(.ui(16, weight: .medium))
                 .foregroundStyle(theme.text)
                 .frame(width: 44, height: 44)
                 .background(Circle().fill(theme.control))
@@ -610,7 +612,7 @@ public struct ReaderView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Find in book", text: $findQuery)
-                        .textFieldStyle(.plain).font(.system(.body))
+                        .textFieldStyle(.plain).font(.ui(17))
                         .autocorrectionDisabled()
                         #if os(iOS)
                         .textInputAutocapitalization(.never)
@@ -645,7 +647,7 @@ public struct ReaderView: View {
                                 ForEach(group.items, id: \.offset) { i, hit in
                                     Button { showFind = false; openHit(i) } label: {
                                         (Text(hit.before) + Text(hit.match).bold().foregroundColor(theme.isDark ? Theme.accent : Theme.accentText) + Text(hit.after))
-                                            .font(.system(.subheadline, design: .serif)).foregroundStyle(Color.primary)
+                                            .font(.ui(15, design: .serif)).foregroundStyle(Color.primary)
                                             .lineLimit(3)
                                     }
                                 }
@@ -685,14 +687,14 @@ public struct ReaderView: View {
                 }.disabled((findIndex ?? 0) == 0).accessibilityLabel("Previous result")
                 Button { showFind = true } label: {
                     Text("“\(findQuery)” · \((findIndex ?? 0) + 1) of \(findHits.count)")
-                        .font(.system(.subheadline, weight: .medium)).lineLimit(1).monospacedDigit()
+                        .font(.ui(14, weight: .medium)).lineLimit(1).monospacedDigit()
                         .padding(.horizontal, 6)
                 }.accessibilityLabel("Result \((findIndex ?? 0) + 1) of \(findHits.count). Show all results")
                 Button { openHit(min(findHits.count - 1, (findIndex ?? 0) + 1)) } label: {
                     Image(systemName: "chevron.right").frame(width: 44, height: 44).contentShape(Rectangle())
                 }.disabled((findIndex ?? 0) >= findHits.count - 1).accessibilityLabel("Next result")
                 Button { withAnimation { endFind() } } label: {
-                    Image(systemName: "xmark").font(.system(.footnote, weight: .semibold)).frame(width: 44, height: 44).contentShape(Rectangle())
+                    Image(systemName: "xmark").font(.ui(13, weight: .semibold)).frame(width: 44, height: 44).contentShape(Rectangle())
                 }.accessibilityLabel("End find")
             }
             .buttonStyle(.plain)
@@ -712,17 +714,17 @@ public struct ReaderView: View {
     var themesSheet: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Text("Themes & Text Size").font(.system(.title3, weight: .bold))
+                Text("Themes & Text Size").font(.ui(20, weight: .bold))
                 Spacer()
                 Button { showThemes = false } label: {
-                    Image(systemName: "xmark").font(.system(.footnote, weight: .bold)).foregroundStyle(.secondary)
+                    Image(systemName: "xmark").font(.ui(13, weight: .bold)).foregroundStyle(.secondary)
                         .frame(width: 30, height: 30).background(Circle().fill(Color.gray.opacity(0.18)))
                         .frame(width: 44, height: 44).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityLabel("Close")
             }
             HStack(spacing: 0) {
                 Button { applyStyle(model.style.smaller()) } label: {
-                    Text("A").font(.system(.subheadline, weight: .medium)).frame(maxWidth: .infinity, minHeight: 44)
+                    Text("A").font(.ui(15, weight: .medium)).frame(maxWidth: .infinity, minHeight: 44)
                 }.buttonStyle(.plain).disabled(model.style.fontSize <= ReaderStyle.sizes.first!)
                 .accessibilityLabel("Smaller text")
                 Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 0.5, height: 22)
@@ -737,7 +739,7 @@ public struct ReaderView: View {
                     Button { var s = model.style; s.theme = t; applyStyle(s) } label: {
                         VStack(spacing: 4) {
                             Text("Aa").font(.system(size: 30, weight: t == .bold ? .bold : .regular, design: .serif)).foregroundStyle(t.text)
-                            Text(t.name).font(.system(.caption, weight: .medium)).foregroundStyle(t.text.opacity(0.8))
+                            Text(t.name).font(.ui(12, weight: .medium)).foregroundStyle(t.text.opacity(0.8))
                         }
                         .frame(maxWidth: .infinity).frame(height: 88)
                         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(t.background))

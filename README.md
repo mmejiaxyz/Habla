@@ -23,6 +23,14 @@ Scripts/build.sh          # → dist/Habla.app (Mac) and dist/Habla.ipa (iPhone)
    on-device translator, iOS 17.4+). Switch the card to *Sentence* to underline or translate the
    whole sentence. On the Mac, double-click a word; the definition shows inline.
 
+## Languages
+
+Books in **English, Spanish, German, Russian and Ukrainian** read fully: layout and hyphenation
+follow the book's language (detected from the text, even when the EPUB says otherwise), and Find,
+the dictionary and translation work in all of them. **Narration** needs a Kokoro voice: English and
+Spanish have voices (Spanish: Dora, Alex, Santa); German, Russian and Ukrainian books are
+text-only until Kokoro adds voices for them.
+
 ## Updates
 
 Every push to `main` runs `.github/workflows/release.yml`: tests, builds both apps, and publishes a

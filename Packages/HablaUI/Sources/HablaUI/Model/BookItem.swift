@@ -42,7 +42,8 @@ public struct BookItem: Identifiable, Hashable, Sendable {
 
     public init(entry e: LibraryEntry, position: ReadingPosition?, availability: Availability) {
         self.init(id: e.id, title: e.title, author: e.author, chapters: [], position: position,
-                  availability: availability, narrated: e.readyChapters, narratable: e.chapterCount,
+                  availability: availability, narrated: e.readyChapters,
+                  narratable: (e.language.map(BookLanguage.hasVoice) ?? true) ? e.chapterCount : 0,
                   duration: e.totalDuration, revision: e.revision)
     }
 
@@ -52,6 +53,8 @@ public struct BookItem: Identifiable, Hashable, Sendable {
     public var isStarted: Bool { position != nil }
     public var isFullyNarrated: Bool { narratable > 0 && narrated >= narratable }
     public var hasAudio: Bool { narrated > 0 }
+    /// Nothing to narrate: the book's language has no voice yet (German, Russian, Ukrainian).
+    public var isTextOnly: Bool { narratable == 0 }
 
     /// The chapter to resume: saved position, else the first non-front-matter chapter.
     public var resumeChapter: Int {

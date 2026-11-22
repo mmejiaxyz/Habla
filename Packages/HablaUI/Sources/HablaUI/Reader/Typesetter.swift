@@ -1,4 +1,5 @@
 import Foundation
+import CoreText
 import SwiftUI
 import HablaCore
 #if canImport(UIKit)
@@ -50,6 +51,9 @@ public struct TypesetChapter {
 }
 
 public enum Typesetter {
+    /// Core Text's language attribute: TextKit hyphenates by it.
+    static let languageKey = NSAttributedString.Key(kCTLanguageAttributeName as String)
+
     /// Writing direction from the paragraph's first strong letter.
     static func direction(of text: String) -> NSWritingDirection {
         for u in text.unicodeScalars where CharacterSet.letters.contains(u) {
@@ -61,7 +65,8 @@ public enum Typesetter {
         return .natural
     }
 
-    public static func set(_ chapter: ChapterText, style: ReaderStyle) -> TypesetChapter {
+    /// `language`: the book's language (ISO code) — hyphenation and line breaking follow it.
+    public static func set(_ chapter: ChapterText, style: ReaderStyle, language: String = "en") -> TypesetChapter {
         let out = NSMutableAttributedString()
         var sentences: [(Int, NSRange)] = []
         let size = style.fontSize
@@ -76,7 +81,8 @@ public enum Typesetter {
             para.lineHeightMultiple = 1.18
             para.lineBreakMode = .byWordWrapping
             para.baseWritingDirection = Self.direction(of: block.text)   // Arabic, Hebrew… read right to left
-            var attrs: [NSAttributedString.Key: Any] = [.foregroundColor: ink, .font: body]
+            var attrs: [NSAttributedString.Key: Any] = [.foregroundColor: ink, .font: body,
+                                                         Self.languageKey: language]
 
             switch block.kind {
             case .sceneBreak:

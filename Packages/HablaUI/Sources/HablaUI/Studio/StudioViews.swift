@@ -300,8 +300,14 @@ public struct StudioWindowView: View {
                 }.padding(.top, 24)
 
                 CapsLabel("Voice").padding(.top, 40).padding(.bottom, 4)
-                Scroll {
-                    VStack(spacing: 0) { ForEach(store.voices, id: \.self) { v in voiceRow(v, book: m) } }
+                if m.canNarrate {
+                    Scroll {
+                        VStack(spacing: 0) { ForEach(store.voices(for: m), id: \.self) { v in voiceRow(v, book: m) } }
+                    }
+                } else {
+                    Text("Kokoro has no \(BookLanguage.name(m.language)) voice yet. This book is ready to read here and on your iPhone; narration will come if a voice is added.")
+                        .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 8)
                 }
             }
             .frame(width: 340)
@@ -310,7 +316,7 @@ public struct StudioWindowView: View {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
                         CapsLabel("Narration")
-                        Text(item.isFullyNarrated ? "Ready to listen" : "\(item.narrated) of \(item.narratable) chapters")
+                        Text(item.isTextOnly ? "Ready to read" : item.isFullyNarrated ? "Ready to listen" : "\(item.narrated) of \(item.narratable) chapters")
                             .font(Theme.display(28)).foregroundStyle(Theme.text)
                         Text(narrationDetail(m, item, rendering)).font(Theme.grotesk(13)).foregroundStyle(Theme.textDim)
                     }
@@ -356,6 +362,7 @@ public struct StudioWindowView: View {
             let eta = r.secondsLeft.map { " · about \(Format.duration($0)) left" } ?? ""
             return "Narrating “\(r.chapterTitle)” · sentence \(r.sentence) of \(r.sentenceCount)\(eta)"
         }
+        if !m.canNarrate { return "Text only · no \(BookLanguage.name(m.language)) voice yet" }
         if store.queue.contains(m.id) { return store.paused ? "Paused" : (store.kokoro == .ready ? "Waiting for another book" : "Waiting for the voice engine") }
         if item.isFullyNarrated { return "\(Format.duration(m.totalDuration)) · \(voiceName(store.voice(for: m)))" }
         return "Not narrated yet — you can still read it"
@@ -364,7 +371,9 @@ public struct StudioWindowView: View {
     @ViewBuilder func narrationButton(_ m: BookManifest, _ item: BookItem) -> some View {
         let active = store.render?.bookID == m.id
         let queued = store.queue.contains(m.id)
-        if active && !store.paused {
+        if !m.canNarrate {
+            EmptyView()
+        } else if active && !store.paused {
             pill("Pause") { store.pauseNarration() }
         } else if queued && store.paused {
             pill("Resume") { store.resumeNarration(m.id) }
@@ -414,9 +423,9 @@ public struct StudioWindowView: View {
 
     func voiceName(_ v: String) -> String { Imprint.voiceName(v) }
     func voiceNote(_ v: String) -> String {
-        let accent = v.hasPrefix("b") ? "British" : "American"
+        let accent = v.hasPrefix("e") ? "Spanish" : v.hasPrefix("b") ? "British" : "American"
         let gender = v.dropFirst().first == "m" ? "male" : "female"
-        return "\(accent) · \(gender)\(v == "af_heart" ? " · recommended" : "")"
+        return "\(accent) · \(gender)\(v == "af_heart" || v == "ef_dora" ? " · recommended" : "")"
     }
 
     func chapterRow(_ c: ChapterInfo, _ r: StudioStore.RenderState?, queued: Bool) -> some View {

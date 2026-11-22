@@ -383,9 +383,14 @@ public final class StudioStore: ObservableObject {
     // MARK: Narration queue
 
     /// The voice the user picked for this book (overrides the one it was narrated with).
+    /// The voice for a book: the one chosen for it, else the default, always in the book's language.
     public func voice(for m: BookManifest) -> String {
-        UserDefaults.standard.string(forKey: "habla.voice.\(m.id)") ?? m.voice?.voiceID ?? defaultVoice
+        let chosen = UserDefaults.standard.string(forKey: "habla.voice.\(m.id)") ?? m.voice?.voiceID ?? defaultVoice
+        return BookLanguage.voice(chosen, speaks: m.language) ? chosen : BookLanguage.defaultVoice(for: m.language)
     }
+
+    /// Voices offered for a book (its language's voices).
+    public func voices(for m: BookManifest) -> [String] { BookLanguage.voices(for: m.language) }
 
     public func setVoice(_ v: String, for m: BookManifest) {
         UserDefaults.standard.set(v, forKey: "habla.voice.\(m.id)")
@@ -402,6 +407,8 @@ public final class StudioStore: ObservableObject {
 
     /// Queues a book. `unpause`: the user asked for narration now (the default).
     public func narrate(_ id: String, unpause: Bool = true) {
+        // No voice for this language (German, Russian, Ukrainian): the book stays text-only.
+        if let m = books.first(where: { $0.id == id }), !m.canNarrate { return }
         var s = stopped; s.remove(id); stopped = s
         if !queue.contains(id) { queue.append(id) }
         if unpause { paused = false }

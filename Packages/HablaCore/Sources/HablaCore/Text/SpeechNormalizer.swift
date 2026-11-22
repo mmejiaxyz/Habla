@@ -4,10 +4,16 @@ import Foundation
 /// "Mr. Darcy, in 1813…" → "Mister Darcy, in eighteen thirteen…".
 /// Returns the input unchanged when nothing needed rewriting.
 public struct SpeechNormalizer {
+    /// Book language. The English rewrites (abbreviations, numbers in words) only apply to
+    /// English; other languages get the language-neutral clean-up, and the voice engine reads
+    /// numbers in its own language.
+    public var language = "en"
+
     public init() {}
 
     public func spoken(_ text: String, isHeading: Bool = false) -> String {
         var s = text
+        if language != "en" { return spokenOther(s, isHeading: isHeading) }
 
         s = s.replacingOccurrences(of: "\n", with: ", ")
         s = s.replacingOccurrences(of: "\u{00A0}", with: " ")
@@ -143,5 +149,26 @@ public struct SpeechNormalizer {
             last = m.range.location + m.range.length
         }
         return out + ns.substring(from: last)
+    }
+
+    /// Non-English text: invisible characters out, dashes as pauses, Roman chapter numbers as digits.
+    func spokenOther(_ text: String, isHeading: Bool) -> String {
+        var s = text
+        s = s.replacingOccurrences(of: "\n", with: ", ")
+        s = s.replacingOccurrences(of: "\u{00A0}", with: " ")
+        s = s.replacingOccurrences(of: "[\u{00AD}\u{200B}\u{2060}\u{FEFF}]", with: "", options: .regularExpression)
+        s = replace(s, #"\s*[—―]\s*"#, ", ")
+        s = replace(s, #"\s+–\s+"#, ", ")
+        s = replace(s, #",\s*,"#, ",")
+        s = replace(s, #"^\s*,\s*"#, "")
+        let words = "Capítulo|CAPÍTULO|Parte|PARTE|Libro|LIBRO|Kapitel|KAPITEL|Teil|TEIL|Глава|ГЛАВА|Часть|ЧАСТЬ|Розділ|РОЗДІЛ|Частина|ЧАСТИНА"
+        s = replace(s, #"\b("# + words + #")\s+([IVXLCDM]+)\b\.?"#) { m in
+            "\(m[1]) \(Self.romanToInt(m[2]).map(String.init) ?? m[2])"
+        }
+        if isHeading {
+            let bare = s.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+            if let n = bare == "I" ? 1 : (Self.romanToInt(bare) ?? Int(bare)) { s = "\(BookLanguage.chapterWord(language)) \(n)" }
+        }
+        return s.trimmingCharacters(in: .whitespaces)
     }
 }

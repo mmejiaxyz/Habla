@@ -79,14 +79,14 @@ enum Fixtures {
     }
 
     /// A custom EPUB: chapters as (file name, raw bytes), a nav TOC listing `toc` files.
-    static func customEPUB(title: String = "Custom", chapters: [(String, Data)], toc: [String]) -> Data {
+    static func customEPUB(title: String = "Custom", chapters: [(String, Data)], toc: [String], language: String? = "en") -> Data {
         let items = chapters.enumerated().map { i, c in "<item id=\"c\(i)\" href=\"\(c.0)\" media-type=\"application/xhtml+xml\"/>" }.joined()
         let spine = chapters.indices.map { "<itemref idref=\"c\($0)\"/>" }.joined()
         let nav = xhtml("<nav epub:type=\"toc\"><ol>" + toc.map { "<li><a href=\"\($0)\">\($0)</a></li>" }.joined() + "</ol></nav>")
         let opf = """
         <?xml version="1.0" encoding="utf-8"?>
         <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
-          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>\(title)</dc:title><dc:creator>Test</dc:creator><dc:language>en</dc:language></metadata>
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>\(title)</dc:title><dc:creator>Test</dc:creator>\(language.map { "<dc:language>\($0)</dc:language>" } ?? "")</metadata>
           <manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>\(items)</manifest>
           <spine>\(spine)</spine>
         </package>

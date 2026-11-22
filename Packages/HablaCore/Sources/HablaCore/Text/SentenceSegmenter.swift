@@ -8,6 +8,8 @@ public struct SentenceSegmenter {
     /// Fragments shorter than this ("Oh!", "Yes.") are merged with the next one
     /// so they get natural intonation instead of sounding clipped.
     public var minLength = 12
+    /// Book language (ISO code): helps the sentence tokenizer.
+    public var language = "en"
 
     public init() {}
 
@@ -17,6 +19,7 @@ public struct SentenceSegmenter {
 
         let tokenizer = NLTokenizer(unit: .sentence)
         tokenizer.string = text
+        tokenizer.setLanguage(NLLanguage(rawValue: language))
         var raw: [NSRange] = []
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { r, _ in
             raw.append(NSRange(r, in: text))
@@ -28,7 +31,7 @@ public struct SentenceSegmenter {
         var merged: [NSRange] = []
         for r in raw {
             if let last = merged.last,
-               Self.endsWithAbbreviation(ns.substring(with: last)) || Self.continuesSentence(ns.substring(with: r)) {
+               Self.endsWithAbbreviation(ns.substring(with: last), language: language) || Self.continuesSentence(ns.substring(with: r)) {
                 merged[merged.count - 1] = NSUnionRange(last, r)
             } else {
                 merged.append(r)
@@ -94,17 +97,24 @@ public struct SentenceSegmenter {
         "rev", "hon", "messrs", "mme", "mlle", "esq", "vs", "no", "vol", "ch", "fig", "mt", "ft",
     ]
 
+    static let languageAbbreviations: [String: Set<String>] = [
+        "es": ["sr", "sra", "srta", "dr", "dra", "ud", "uds", "pág", "págs", "etc", "aprox", "núm", "av", "dña", "dª", "d"],
+        "de": ["dr", "prof", "bzw", "usw", "ca", "evtl", "ggf", "nr", "hr", "fr", "str", "vgl", "bspw", "inkl", "s", "z", "b", "d", "h", "u", "a", "o", "ä"],
+        "ru": ["т", "е", "д", "п", "г", "гг", "др", "пр", "см", "рис", "стр", "им", "ул", "тыс", "млн", "р", "ст", "напр", "проф"],
+        "uk": ["т", "д", "п", "р", "рр", "ін", "см", "рис", "стор", "ім", "вул", "тис", "млн", "ст", "напр", "проф"],
+    ]
+
     /// "…taken it?” cried his wife." — a lowercase start continues the previous sentence.
     static func continuesSentence(_ s: String) -> Bool {
         guard let first = s.first(where: { !$0.isWhitespace && !"“”\"'‘’([—".contains($0) }) else { return false }
         return first.isLowercase
     }
 
-    static func endsWithAbbreviation(_ s: String) -> Bool {
+    static func endsWithAbbreviation(_ s: String, language: String = "en") -> Bool {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.hasSuffix(".") else { return false }
         let word = t.dropLast().split(whereSeparator: { !$0.isLetter }).last.map { $0.lowercased() } ?? ""
-        if abbreviations.contains(word) { return true }
+        if abbreviations.contains(word) || languageAbbreviations[language]?.contains(word) == true { return true }
         // Single initials: "J. R. R. Tolkien".
         return word.count == 1 && t.dropLast().last?.isUppercase == true
     }
