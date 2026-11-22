@@ -7,6 +7,7 @@ public actor EnginePool: TTSEngine {
     public nonisolated let name: String
     public nonisolated let cacheVersion: String
     public nonisolated let size: Int
+    public nonisolated let modelDescription: String
     private let engines: [TTSEngine]
     private var free: [Int]
     private var waiters: [CheckedContinuation<Int, Never>] = []
@@ -17,6 +18,7 @@ public actor EnginePool: TTSEngine {
         name = engines[0].name
         cacheVersion = engines[0].cacheVersion
         size = engines.count
+        modelDescription = engines[0].modelDescription
         free = Array(engines.indices)
     }
 

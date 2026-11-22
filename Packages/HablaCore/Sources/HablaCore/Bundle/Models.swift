@@ -74,6 +74,8 @@ public struct ChapterInfo: Codable, Equatable, Sendable {
     public var audioStatus: AudioStatus
     /// Voice this chapter's audio was made with (nil = the book's voice, older bundles).
     public var voiceID: String? = nil
+    /// The voice model that narrated it, e.g. "Kokoro v1.0 · fast (int8)" (nil in older bundles).
+    public var model: String? = nil
 }
 
 public struct FileEntry: Codable, Equatable, Hashable, Sendable {
@@ -214,6 +216,16 @@ public struct SentenceTiming: Codable, Equatable, Sendable {
 }
 
 public extension BookManifest {
+    /// The imprint: which voice models narrated this book (usually one; two if the model
+    /// changed while it was being narrated). Older bundles don't record it.
+    var narrationModels: [String] {
+        var seen: [String] = []
+        for c in chapters where c.audioStatus == .ready {
+            if let m = c.model, !seen.contains(m) { seen.append(m) }
+        }
+        return seen
+    }
+
     /// Stand-in for a book whose files are gone (e.g. a restored reader window after deletion).
     static func missing(id: String) -> BookManifest {
         BookManifest(id: id, title: "This book was deleted", author: "", language: "en", sourceFileName: "",

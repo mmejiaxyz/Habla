@@ -288,6 +288,9 @@ public struct PhoneBookView: View {
                     Button { openChapter(b, c) } label: { chapterRow(b, c) }.buttonStyle(.plain)
                 }
             }
+            if b.availability == .local, let m = store.manifest(b.id) {
+                ImprintView(manifest: m).padding(.top, Theme.section)
+            }
             if b.availability == .local {
                 Button("Remove download") { confirmRemove = true }
                     .font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).buttonStyle(.plain).padding(.top, 28)

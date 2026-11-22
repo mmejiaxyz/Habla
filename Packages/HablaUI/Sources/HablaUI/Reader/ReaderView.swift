@@ -38,6 +38,12 @@ public struct ReaderView: View {
     @State private var chrome: Bool
     @State private var showThemes = false
     @State private var showContents = false
+    @State private var showFind = false
+    @State private var findQuery = ""
+    @State private var findHits: [FindHit] = []
+    @State private var findIndex: Int?
+    @State private var findSearching = false
+    @State private var findTask: Task<Void, Never>?
     @State private var forward = true
     @State private var toast: String?
     @State private var toastTask: Task<Void, Never>?
@@ -64,10 +70,18 @@ public struct ReaderView: View {
 
     public init(model: ReaderModel, player: NarrationPlayer, chrome: Bool = false,
                 onClose: @escaping () -> Void, onStyle: @escaping (ReaderStyle) -> Void = { _ in },
-                onOpenPlayer: @escaping () -> Void = {}, previewWordAt: CGPoint? = nil) {
+                onOpenPlayer: @escaping () -> Void = {}, previewWordAt: CGPoint? = nil, previewFind: String? = nil) {
         self.model = model; self.player = player
         self.onClose = onClose; self.onStyle = onStyle; self.onOpenPlayer = onOpenPlayer
         _chrome = State(initialValue: chrome)
+        // Snapshots: show a search result as if picked from the list.
+        if let q = previewFind {
+            let hits = BookFind.search(q, in: model.bundle, manifest: model.manifest)
+            if hits.count > 2 {
+                model.show(hits[2], query: q)
+                _findQuery = State(initialValue: q); _findHits = State(initialValue: hits); _findIndex = State(initialValue: 2)
+            }
+        }
         // Snapshots: open the word card on the word at this point of the page.
         if let pt = previewWordAt, let w = model.layout?.wordRange(at: pt, onPage: model.page) {
             _selection = State(initialValue: WordSelection(page: model.page, word: w, sentence: model.sentenceRange(around: w.location)))
@@ -90,6 +104,7 @@ public struct ReaderView: View {
             if !chrome && !isSpread && narratingHere && player.isPlaying { quietPauseButton }
             if let toast { toastView(toast) }
             if let sel = selection { wordCard(sel) }
+            else if findIndex != nil, !findHits.isEmpty { findBar }
         }
         .preferredColorScheme(theme.isDark ? .dark : .light)
         .modifier(TranslateSheet(text: $translateText))
@@ -102,6 +117,7 @@ public struct ReaderView: View {
         .onChange(of: model.page) { _, _ in selection = nil }
         .sheet(isPresented: $showThemes) { themesSheet }
         .sheet(isPresented: $showContents) { contentsSheet }
+        .sheet(isPresented: $showFind) { findSheet }
         .onChange(of: player.sentence) { _, _ in syncWithNarration() }
         .onChange(of: player.chapter) { _, _ in syncWithNarration() }
         .onAppear { syncWithNarration() }
@@ -111,6 +127,10 @@ public struct ReaderView: View {
         .onKeyPress(.rightArrow) { turn(true); return .handled }
         .onKeyPress(.leftArrow) { turn(false); return .handled }
         .onKeyPress(.space) { turn(true); return .handled }
+        .onKeyPress(keys: ["f"]) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            showFind = true; return .handled
+        }
         #endif
     }
 
@@ -135,7 +155,8 @@ public struct ReaderView: View {
                             PageCanvas(layout: layout, page: p,
                                        highlight: model.highlightedSentence(onChapter: model.chapter),
                                        highlightColor: theme.highlight,
-                                       selection: selection?.page == p ? selectedRange : nil,
+                                       selection: selection?.page == p ? selectedRange
+                                           : (model.found?.chapter == model.chapter ? model.found?.range : nil),
                                        underlines: model.underlineRanges(),
                                        underlineColor: theme.isDark ? Theme.accent : Theme.accentText)
                         } else {
@@ -148,6 +169,7 @@ public struct ReaderView: View {
                 .transition(.asymmetric(insertion: .move(edge: forward ? .trailing : .leading).combined(with: .opacity),
                                         removal: .move(edge: forward ? .leading : .trailing).combined(with: .opacity)))
                 footer(width: size.width).offset(y: size.height - 16)
+                    .opacity(findIndex != nil && !findHits.isEmpty ? 0 : 1)
             } else if let err = model.loadError {
                 Text(err).font(.system(size: 15)).foregroundStyle(theme.secondary).padding(.top, 120)
             }
@@ -226,6 +248,7 @@ public struct ReaderView: View {
 
     func tap(at point: CGPoint, in size: CGSize) {
         if selection != nil { withAnimation(.easeOut(duration: 0.15)) { selection = nil }; return }
+        if model.found != nil && findIndex == nil { model.found = nil }
         let x = point.x / max(1, size.width)
         if isSpread { turn(x > 0.5); return }
         if x > 0.72 { turn(true) } else if x < 0.28 { turn(false) }
@@ -430,6 +453,7 @@ public struct ReaderView: View {
                 if narratingHere && !isSpread {
                     roundButton("♪", label: "Open the player (speed, sleep timer)") { onOpenPlayer() }
                 }
+                symbolButton("magnifyingglass", label: "Find in book") { showFind = true }
                 roundButton("☰", label: "Contents") { showContents = true }
                 if isSpread {
                     roundButton("Aa", label: "Themes and size", serif: true) { showThemes = true }
@@ -508,6 +532,148 @@ public struct ReaderView: View {
                 .padding(.horizontal, 18).padding(.vertical, 12)
                 .background(Capsule().fill(theme.isDark ? Color.white : Color.black).opacity(0.85))
                 .padding(.bottom, 90).padding(.horizontal, 24)
+        }
+        .transition(.opacity)
+    }
+
+    func symbolButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 16, weight: .medium))
+                .foregroundStyle(theme.text)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(theme.control))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    // MARK: Find
+
+    func runFind(_ q: String) {
+        findTask?.cancel()
+        let query = q.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 2 else { findHits = []; findSearching = false; return }
+        findSearching = true
+        let bundle = model.bundle, manifest = model.manifest
+        findTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)          // wait for typing to pause
+            guard !Task.isCancelled else { return }
+            let hits = await Task.detached(priority: .userInitiated) { BookFind.search(query, in: bundle, manifest: manifest) }.value
+            guard !Task.isCancelled else { return }
+            findHits = hits
+            findSearching = false
+        }
+    }
+
+    func openHit(_ i: Int) {
+        guard findHits.indices.contains(i) else { return }
+        findIndex = i
+        let hit = findHits[i]
+        forward = hit.chapter > model.chapter || (hit.chapter == model.chapter)
+        withAnimation(.easeOut(duration: 0.2)) { model.show(hit, query: findQuery) }
+    }
+
+    func endFind() {
+        findIndex = nil
+        model.found = nil
+    }
+
+    var findSheet: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Find in book", text: $findQuery)
+                        .textFieldStyle(.plain).font(.system(size: 17))
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .onSubmit { if !findHits.isEmpty { showFind = false; openHit(0) } }
+                    if !findQuery.isEmpty {
+                        Button { findQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                            .buttonStyle(.plain).accessibilityLabel("Clear")
+                    }
+                }
+                .padding(.horizontal, 14).frame(height: 44)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.gray.opacity(0.14)))
+                .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 6)
+
+                if findSearching {
+                    ProgressView().padding(.top, 30)
+                    Spacer()
+                } else if findQuery.trimmingCharacters(in: .whitespaces).count >= 2 && findHits.isEmpty {
+                    Text("No results for “\(findQuery)”").foregroundStyle(.secondary).padding(.top, 30)
+                    Spacer()
+                } else {
+                    List {
+                        if !findHits.isEmpty {
+                            Text(findHits.count >= 500 ? "500+ results" : "\(findHits.count) result\(findHits.count == 1 ? "" : "s")")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        ForEach(Array(groupedHits.enumerated()), id: \.offset) { _, group in
+                            Section(group.title) {
+                                ForEach(group.items, id: \.offset) { i, hit in
+                                    Button { showFind = false; openHit(i) } label: {
+                                        (Text(hit.before) + Text(hit.match).bold().foregroundColor(Theme.accentText) + Text(hit.after))
+                                            .font(.system(size: 15, design: .serif)).foregroundStyle(Color.primary)
+                                            .lineLimit(3)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Find")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showFind = false } } }
+        }
+        .onChange(of: findQuery) { _, q in runFind(q) }
+        .frame(minWidth: isSpread ? 460 : nil, minHeight: isSpread ? 560 : nil)
+        .presentationDetents([.large])
+    }
+
+    var groupedHits: [(title: String, items: [(offset: Int, element: FindHit)])] {
+        var out: [(title: String, items: [(offset: Int, element: FindHit)])] = []
+        for (i, h) in findHits.enumerated() {
+            if out.last?.title == h.chapterTitle { out[out.count - 1].items.append((i, h)) }
+            else { out.append((h.chapterTitle, [(i, h)])) }
+        }
+        return out
+    }
+
+    /// "‹  3 of 12  ›" while stepping through results.
+    var findBar: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 4) {
+                Button { openHit(max(0, (findIndex ?? 0) - 1)) } label: {
+                    Image(systemName: "chevron.left").frame(width: 44, height: 40)
+                }.disabled((findIndex ?? 0) == 0).accessibilityLabel("Previous result")
+                Button { showFind = true } label: {
+                    Text("“\(findQuery)” · \((findIndex ?? 0) + 1) of \(findHits.count)")
+                        .font(.system(size: 14, weight: .medium)).lineLimit(1).monospacedDigit()
+                        .padding(.horizontal, 6)
+                }.accessibilityLabel("Result \((findIndex ?? 0) + 1) of \(findHits.count). Show all results")
+                Button { openHit(min(findHits.count - 1, (findIndex ?? 0) + 1)) } label: {
+                    Image(systemName: "chevron.right").frame(width: 44, height: 40)
+                }.disabled((findIndex ?? 0) >= findHits.count - 1).accessibilityLabel("Next result")
+                Button { withAnimation { endFind() } } label: {
+                    Image(systemName: "xmark").font(.system(size: 13, weight: .semibold)).frame(width: 40, height: 40)
+                }.accessibilityLabel("End find")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 6)
+            .background(Capsule().fill(theme.background))
+            .background(Capsule().fill(theme.control))
+            .overlay(Capsule().strokeBorder(theme.text.opacity(0.08), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+            .padding(.bottom, chrome ? 70 : 6)   // takes the footer's place (hidden while finding)
         }
         .transition(.opacity)
     }

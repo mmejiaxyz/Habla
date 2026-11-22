@@ -49,6 +49,8 @@ public final class ReaderModel: ObservableObject {
     @Published public var style: ReaderStyle { didSet { if style != oldValue { relayout() } } }
     /// Sentence being narrated (in `highlightChapter`), drawn behind the text.
     @Published public private(set) var highlight: (chapter: Int, sentence: Int)?
+    /// The search result on screen (chapter, range in the typeset chapter text).
+    @Published public var found: (chapter: Int, range: NSRange)?
 
     /// Called when the reader settles on a new place (to save / sync the position).
     public var onPosition: ((Int, Int) -> Void)?
@@ -134,6 +136,12 @@ public final class ReaderModel: ObservableObject {
         if c == chapter && sentence == nil && layout != nil { return }   // already here: keep the place
         if c == chapter, let s = sentence, let p = layout?.page(forSentence: s) { page = align(p) }
         else { switchChapter(c, sentence: sentence) }
+        settle()
+    }
+
+    /// Shows a page of the current chapter (keeps two-page spreads aligned).
+    public func goToPage(_ p: Int) {
+        page = align(min(max(0, p), pageCount - 1))
         settle()
     }
 

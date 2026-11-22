@@ -174,6 +174,13 @@ public final class StudioStore: ObservableObject {
 
     public var serverName: String { server.serviceName }
 
+    /// What new narration uses right now, e.g. "Kokoro v1.0 · fast (int8) · 2 workers".
+    public var engineDescription: String {
+        let model = KokoroEngine.Configuration(toolsDirectory: kokoroDirectory).model.lastPathComponent
+        let workers = EnginePool.recommendedWorkers
+        return "\(KokoroEngine.describe(modelFile: model)) · \(workers) worker\(workers == 1 ? "" : "s")"
+    }
+
     /// Kokoro workers for narration: two on Macs with enough cores and memory (~40% faster).
     func makeEngine() -> EnginePool {
         let cfg = KokoroEngine.Configuration(toolsDirectory: kokoroDirectory)

@@ -86,6 +86,9 @@ let phone = CGSize(width: 390, height: 844)
             for y in stride(from: 120.0, to: 420, by: 23) { if let w = l.wordRange(at: CGPoint(x: 150, y: y), onPage: model.page) { hits.append(w) } }
             if let r = hits.first, let s = model.sentenceRange(around: r.location) { model.addUnderline(s) }
         }
+        let fm2 = ReaderModel(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: nil, style: ReaderStyle())
+        fm2.setPageSize(CGSize(width: phone.width - 52, height: phone.height - 74 - 22))
+        render("p12-reader-find", ReaderView(model: fm2, player: NarrationPlayer(), onClose: {}, previewFind: "Netherfield"))
         render("p10-reader-word", ReaderView(model: model, player: NarrationPlayer(), onClose: {}, previewWordAt: CGPoint(x: 200, y: 300)))
     }
 

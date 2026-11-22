@@ -18,10 +18,13 @@ public protocol TTSEngine: Sendable {
     func synthesize(_ text: String, voice: VoiceInfo) async throws -> SpeechAudio
     /// Release the model / worker process.
     func shutdown() async
+    /// Human-readable model name for the imprint, e.g. "Kokoro v1.0 · fast (int8)".
+    var modelDescription: String { get }
 }
 
 public extension TTSEngine {
     func shutdown() async {}
+    var modelDescription: String { name }
 }
 
 public enum TTSError: Error, CustomStringConvertible {

@@ -7,6 +7,7 @@ public actor KokoroEngine: TTSEngine {
     public nonisolated let name = "kokoro"
     /// Cached audio is only reused for the same model file (the int8 model sounds a little different).
     public nonisolated let cacheVersion: String
+    public nonisolated let modelDescription: String
 
     public struct Configuration: Sendable {
         public var python: URL
@@ -45,6 +46,7 @@ public actor KokoroEngine: TTSEngine {
         config = configuration
         let model = configuration.model.deletingPathExtension().lastPathComponent   // "kokoro-v1.0"
         cacheVersion = model == "kokoro-v1.0" ? "kokoro-v1.0-onnx" : "\(model)-onnx"
+        modelDescription = Self.describe(modelFile: configuration.model.lastPathComponent)
         scratch = FileManager.default.temporaryDirectory.appendingPathComponent("habla-kokoro-\(UUID().uuidString)")
     }
 
@@ -100,6 +102,19 @@ public actor KokoroEngine: TTSEngine {
     }
 
     /// Kokoro voice ids start with a language letter: a = American, b = British English.
+    /// "kokoro-v1.0.int8.onnx" → "Kokoro v1.0 · fast (int8)"; "kokoro-v1.0.onnx" → "Kokoro v1.0 · full".
+    public static func describe(modelFile: String) -> String {
+        var name = modelFile.hasSuffix(".onnx") ? String(modelFile.dropLast(5)) : modelFile
+        var variant: String?
+        for v in ["int8", "fp16"] where name.hasSuffix("." + v) { variant = v; name = String(name.dropLast(v.count + 1)) }
+        let base = name.replacingOccurrences(of: "kokoro-", with: "Kokoro ")
+        switch variant {
+        case "int8": return "\(base) · fast (int8)"
+        case let v?: return "\(base) · \(v)"
+        case nil: return "\(base) · full"
+        }
+    }
+
     static func language(for voiceID: String, default fallback: String) -> String {
         switch voiceID.first {
         case "a": return "en-us"

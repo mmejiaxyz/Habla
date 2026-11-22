@@ -106,6 +106,7 @@ public final class RenderPipeline: @unchecked Sendable {
                 manifest.chapters[i].duration = duration
                 manifest.chapters[i].audioStatus = .ready
                 manifest.chapters[i].voiceID = voice.voiceID
+                manifest.chapters[i].model = engine.modelDescription
             }
             manifest = try bundle.commit(manifest)
             pruneCache()

@@ -143,6 +143,37 @@ final class AppFlowTests: XCTestCase {
         XCTAssertTrue(model.underlineRanges().isEmpty)
     }
 
+    func testFindLandsOnTheMatch() throws {
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.epub.path))
+        let lib = temp()
+        let b = try BookImporter().importEPUB(at: Self.epub, into: lib)
+        let m = try b.manifest()
+        let hits = BookFind.search("NETHERFIELD", in: b, manifest: m)
+        XCTAssertGreaterThan(hits.count, 20)
+        XCTAssertEqual(hits.map(\.chapter), hits.map(\.chapter).sorted(), "results in reading order")
+        XCTAssertTrue(hits.allSatisfy { $0.match.lowercased() == "netherfield" })
+        let model = ReaderModel(bundle: b, manifest: m, chapter: m.chapters[0].index, sentence: nil, style: ReaderStyle())
+        model.setPageSize(CGSize(width: 338, height: 700))
+        for hit in [hits[0], hits[hits.count / 2], hits.last!] {
+            model.show(hit, query: "netherfield")
+            let found = try XCTUnwrap(model.found)
+            XCTAssertEqual(found.chapter, hit.chapter)
+            let layout = try XCTUnwrap(model.layout)
+            XCTAssertEqual((layout.chapter.text.string as NSString).substring(with: found.range).lowercased(), "netherfield")
+            XCTAssertTrue(NSLocationInRange(found.range.location, layout.characterRange(ofPage: model.page)), "match is on the page shown")
+        }
+        XCTAssertTrue(BookFind.search("x", in: b, manifest: m).isEmpty, "one letter doesn't search")
+    }
+
+    func testImprintRecordsTheModel() async throws {
+        let (_, b, _) = try await macLibrary()
+        let m = try b.manifest()
+        XCTAssertEqual(m.narrationModels, ["tone"])
+        XCTAssertTrue(Imprint.lines(m).first?.hasPrefix("Narrated with tone") == true, Imprint.lines(m).joined(separator: " | "))
+        XCTAssertEqual(KokoroEngine.describe(modelFile: "kokoro-v1.0.int8.onnx"), "Kokoro v1.0 · fast (int8)")
+        XCTAssertEqual(KokoroEngine.describe(modelFile: "kokoro-v1.0.onnx"), "Kokoro v1.0 · full")
+    }
+
     func testReaderNeverLosesThePlace() throws {
         try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.epub.path))
         let lib = temp()

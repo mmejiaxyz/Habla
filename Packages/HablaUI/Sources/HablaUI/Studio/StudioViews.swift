@@ -294,6 +294,9 @@ public struct StudioWindowView: View {
                 Scroll {
                     VStack(spacing: 0) { ForEach(store.voices, id: \.self) { v in voiceRow(v, book: m) } }
                 }
+                Text("Engine: \(store.engineDescription)")
+                    .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).padding(.top, 10)
+                ImprintView(manifest: m).padding(.top, 22)
             }
             .frame(width: 340)
 
@@ -396,7 +399,7 @@ public struct StudioWindowView: View {
         .onTapGesture { if !on { store.setVoice(v, for: m) } }
     }
 
-    func voiceName(_ v: String) -> String { (v.split(separator: "_").last.map(String.init) ?? v).capitalized }
+    func voiceName(_ v: String) -> String { Imprint.voiceName(v) }
     func voiceNote(_ v: String) -> String {
         let accent = v.hasPrefix("b") ? "British" : "American"
         let gender = v.dropFirst().first == "m" ? "male" : "female"
