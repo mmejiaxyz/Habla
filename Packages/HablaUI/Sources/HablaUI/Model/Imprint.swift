@@ -21,22 +21,20 @@ public enum Imprint {
         return out
     }
 
+    /// The app's About lines: version, and the voice models behind the books on this device.
+    public static func about(models: [String], engine: String? = nil) -> [String] {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let build = info?["CFBundleVersion"] as? String ?? "0"
+        var out = ["Habla \(version) (build \(build))"]
+        if let engine { out.append("Voice engine: \(engine)") }
+        out.append(models.isEmpty ? "No narrated books yet" : "Books narrated with \(models.joined(separator: " and "))")
+        out.append("Narration made on your Mac with Kokoro, free and offline")
+        return out
+    }
+
     /// "af_heart" → "Heart", "bm_george" → "George".
     public static func voiceName(_ id: String) -> String {
         (id.split(separator: "_").last.map(String.init) ?? id).capitalized
-    }
-}
-
-/// "IMPRINT" + small lines, quiet like a colophon.
-struct ImprintView: View {
-    let manifest: BookManifest
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            CapsLabel("Imprint").padding(.bottom, 4)
-            ForEach(Imprint.lines(manifest), id: \.self) { line in
-                Text(line).font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .accessibilityElement(children: .combine)
     }
 }

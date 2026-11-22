@@ -48,10 +48,20 @@ public final class ProgressStore: @unchecked Sendable {
     public let fileURL: URL
     private let lock = NSLock()
     private var positions: [String: ReadingPosition]
+    /// Books changed on this device and not yet acknowledged by the Mac (book → change number).
+    /// Sync sends exactly these and takes the Mac's answer as final for everything else, so
+    /// device clocks never decide what gets sent.
+    private var pendingChanges: [String: Int] = [:]
+    private var changeCounter = 0
+    private var pendingURL: URL { fileURL.deletingPathExtension().appendingPathExtension("pending.json") }
 
     public init(fileURL: URL) {
         self.fileURL = fileURL
         positions = [:]
+        if let d = try? Data(contentsOf: fileURL.deletingPathExtension().appendingPathExtension("pending.json")),
+           let ids = try? JSONDecoder().decode([String].self, from: d) {
+            for id in ids { changeCounter += 1; pendingChanges[id] = changeCounter }
+        }
         guard let data = try? Data(contentsOf: fileURL) else { return }
         // Entry by entry: one bad record must never cost every other book its place.
         if let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -92,6 +102,56 @@ public final class ProgressStore: @unchecked Sendable {
         return winner
     }
 
+    /// A place this device just reached (reading or listening). It always becomes this
+    /// device's position, even if the clock was moved back: its time is pushed just past the
+    /// one it replaces. It is sent to the Mac on the next sync.
+    @discardableResult
+    public func record(_ local: ReadingPosition) -> ReadingPosition {
+        var p = local
+        let saved: ReadingPosition = lock.withLock {
+            if let old = positions[p.bookID], old.updatedAt >= p.updatedAt {
+                p.updatedAt = old.updatedAt.addingTimeInterval(0.001)
+            }
+            positions[p.bookID] = p
+            changeCounter += 1
+            pendingChanges[p.bookID] = changeCounter
+            return p
+        }
+        save()
+        return saved
+    }
+
+    /// Local changes waiting for the Mac, with their change numbers.
+    public var pending: [(position: ReadingPosition, change: Int)] {
+        lock.withLock { pendingChanges.compactMap { id, n in positions[id].map { ($0, n) } } }
+    }
+
+    /// The Mac answered a pushed change: its winner becomes ours, unless the book moved again meanwhile.
+    public func acknowledge(_ winner: ReadingPosition, change: Int) {
+        lock.withLock {
+            guard pendingChanges[winner.bookID] == change else { return }
+            pendingChanges[winner.bookID] = nil
+            positions[winner.bookID] = winner
+        }
+        save()
+    }
+
+    /// The Mac's position for a book this device hasn't changed since: taken as is.
+    public func adopt(_ remote: ReadingPosition) {
+        lock.withLock {
+            guard pendingChanges[remote.bookID] == nil else { return }
+            positions[remote.bookID] = remote
+        }
+        save()
+    }
+
+    /// Marks books as changed here (e.g. positions saved by an older version, never sent).
+    public func markPending(_ bookIDs: [String]) {
+        guard !bookIDs.isEmpty else { return }
+        lock.withLock { for id in bookIDs where positions[id] != nil { changeCounter += 1; pendingChanges[id] = changeCounter } }
+        save()
+    }
+
     public func remove(_ bookID: String) {
         _ = lock.withLock { positions.removeValue(forKey: bookID) }
         save()
@@ -102,12 +162,13 @@ public final class ProgressStore: @unchecked Sendable {
         lock.withLock {
             try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? JSON.encoder.encode(positions).write(to: fileURL, options: .atomic)
+            try? JSONEncoder().encode(Array(pendingChanges.keys)).write(to: pendingURL, options: .atomic)
         }
     }
 
     /// Positions changed after a date (only those need sending).
     public func changed(since date: Date?) -> [ReadingPosition] {
-        guard let date else { return all }
+        guard let date, date <= Date() else { return all }   // a date in the future = clock moved back
         return all.filter { $0.updatedAt > date }
     }
 }

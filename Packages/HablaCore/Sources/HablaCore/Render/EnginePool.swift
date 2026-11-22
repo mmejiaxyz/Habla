@@ -49,11 +49,15 @@ public actor EnginePool: TTSEngine {
         if waiters.isEmpty { free.append(i) } else { waiters.removeFirst().resume(returning: i) }
     }
 
-    /// Sensible worker count for this Mac: one per ~4 performance cores, two at most,
-    /// and only one on Macs with little memory (each worker keeps the model loaded).
-    public static var recommendedWorkers: Int {
-        let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        return (memoryGB >= 7.5 && cores >= 8) ? 2 : 1
+    /// Sensible worker count for this Mac. Each worker keeps the model loaded: about 0.3 GB
+    /// with the fast (int8) model, over 1 GB with the full one. Two need 8+ cores, and 8 GB of
+    /// memory with the fast model or 12 GB with the full one.
+    public static func recommendedWorkers(fastModel: Bool = true,
+                                          memoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+                                          cores: Int = ProcessInfo.processInfo.activeProcessorCount) -> Int {
+        let memoryGB = Double(memoryBytes) / 1_073_741_824
+        guard cores >= 8 else { return 1 }
+        return memoryGB >= (fastModel ? 7.5 : 11.5) ? 2 : 1
     }
+
 }

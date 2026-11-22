@@ -15,6 +15,14 @@ public struct BookBundle: Sendable {
         library.appendingPathComponent("\(id).\(fileExtension)", isDirectory: true)
     }
 
+    /// A path a manifest may name: relative, inside the bundle, no `..`/`.` steps, no
+    /// backslashes or NULs. Anything else could write outside the library when syncing.
+    public static func isSafeRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.hasPrefix("~"),
+              !path.contains("\\"), !path.contains("\u{0}") else { return false }
+        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+
     public func fileURL(_ path: String) -> URL { url.appendingPathComponent(path) }
 
     public static func textPath(_ i: Int) -> String { String(format: "text/ch%03d.json", i) }
@@ -69,11 +77,15 @@ public struct BookBundle: Sendable {
             if rel == Self.manifestFile || rel.hasPrefix(".") || rel.contains("/.") { continue }
             // Work files from an interrupted render are never part of the book.
             if rel.hasSuffix(".part") || rel.hasSuffix(".writing.m4a") { continue }
-            // Unchanged since the last commit (same size, not modified after it): reuse the hash.
-            if let k = known[rel], k.size == values.fileSize, let since, let mod = values.contentModificationDate, mod < since {
+            // Unchanged since the last commit: same size and exactly the same modification time
+            // as recorded then. (Comparing against the commit date broke when the clock moved back.)
+            let mod = values.contentModificationDate
+            if let k = known[rel], k.size == values.fileSize, let kMod = k.modified, let mod,
+               abs(kMod.timeIntervalSince(mod)) < 0.002 {   // manifests keep milliseconds
                 out.append(k); continue
             }
-            out.append(FileEntry(path: rel, size: values.fileSize ?? 0, sha256: try Self.sha256(of: file)))
+            _ = since
+            out.append(FileEntry(path: rel, size: values.fileSize ?? 0, sha256: try Self.sha256(of: file), modified: mod))
         }
         return out.sorted { $0.path < $1.path }
     }

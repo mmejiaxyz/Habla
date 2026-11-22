@@ -127,7 +127,10 @@ public enum Format {
     }
 
     public static func bytes(_ b: Int) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(b), countStyle: .file)
+        let f = ByteCountFormatter()
+        f.countStyle = .file
+        f.allowsNonnumericFormatting = false   // "0 KB", not "Zero KB"
+        return f.string(fromByteCount: Int64(b))
     }
 
     public static func ago(_ d: Date?) -> String {

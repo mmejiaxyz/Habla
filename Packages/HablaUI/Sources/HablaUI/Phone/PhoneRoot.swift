@@ -23,6 +23,7 @@ public struct PhoneRoot: View {
     @StateObject private var player = NarrationPlayer()
     @State private var path: [PhoneRoute] = []
     @State private var cover: PhoneCover?
+    @State private var repairAttempts: [String: Date] = [:]
     @Environment(\.scenePhase) private var phase
 
     public init(store: PhoneStore? = nil) {
@@ -58,10 +59,22 @@ public struct PhoneRoot: View {
                 store?.savePosition(book: book, chapter: chapter, sentence: sentence, audioTime: time, mode: .listening)
             }
             player.onDamaged = { [weak store, weak player] id in
+                // One repair attempt per chapter every 10 minutes: a chapter that can't be fixed
+                // right now (no Mac) must not retry in a loop.
+                guard let store, let player else { return }
+                let key = "\(id)-\(player.chapter)"
+                if let last = repairAttempts[key], Date().timeIntervalSince(last) < 600 {
+                    player.message = "This chapter's audio is damaged. Open Habla on your Mac, then try again."
+                    return
+                }
+                repairAttempts[key] = Date()
                 Task {
-                    await store?.repair(id)
-                    if let store, let player, let m = store.manifest(id) {
+                    let fixed = await store.repair(id)
+                    if fixed, let m = store.manifest(id) {
                         player.load(bundle: store.bundle(id), manifest: m, chapter: player.chapter, sentence: player.sentence, autoplay: false)
+                        player.message = "Repaired. Press play to continue."
+                    } else {
+                        player.message = "This chapter's audio is damaged. Open Habla on your Mac to repair it; you can keep reading meanwhile."
                     }
                 }
             }

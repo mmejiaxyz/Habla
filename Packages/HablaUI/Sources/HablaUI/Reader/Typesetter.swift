@@ -50,6 +50,17 @@ public struct TypesetChapter {
 }
 
 public enum Typesetter {
+    /// Writing direction from the paragraph's first strong letter.
+    static func direction(of text: String) -> NSWritingDirection {
+        for u in text.unicodeScalars where CharacterSet.letters.contains(u) {
+            switch u.value {
+            case 0x0590...0x08FF, 0xFB1D...0xFDFF, 0xFE70...0xFEFF, 0x10800...0x10FFF, 0x1E800...0x1EFFF: return .rightToLeft
+            default: return .leftToRight
+            }
+        }
+        return .natural
+    }
+
     public static func set(_ chapter: ChapterText, style: ReaderStyle) -> TypesetChapter {
         let out = NSMutableAttributedString()
         var sentences: [(Int, NSRange)] = []
@@ -64,6 +75,7 @@ public enum Typesetter {
             para.hyphenationFactor = 0.9
             para.lineHeightMultiple = 1.18
             para.lineBreakMode = .byWordWrapping
+            para.baseWritingDirection = Self.direction(of: block.text)   // Arabic, Hebrew… read right to left
             var attrs: [NSAttributedString.Key: Any] = [.foregroundColor: ink, .font: body]
 
             switch block.kind {

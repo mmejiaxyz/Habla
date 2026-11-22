@@ -180,6 +180,61 @@ final class AppFlowTests: XCTestCase {
         XCTAssertGreaterThan(BookFind.search("mr. bennet", in: b, manifest: m).count, 50)
     }
 
+    /// Long chapters keep their ending: hyphenation adds glyphs during layout, and every
+    /// character must still land on a page.
+    func testLongChapterPaginationCoversEverything() throws {
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.epub.path))
+        let b = try BookImporter().importEPUB(at: Self.epub, into: temp())
+        let m = try b.manifest()
+        // One very long chapter: every chapter's paragraphs together.
+        let blocks = try m.chapters.prefix(20).flatMap { try b.chapterText($0).blocks }   // ~a third of the book
+        var id = 0
+        let renumbered = blocks.map { block -> TextBlock in
+            var bl = block
+            bl.sentences = bl.sentences.map { var s = $0; s.id = id; id += 1; return s }
+            return bl
+        }
+        var chapter = try b.chapterText(m.chapters[0])
+        chapter.blocks = renumbered
+        let typeset = Typesetter.set(chapter, style: ReaderStyle(fontSize: 31))
+        let layout = PageLayout(chapter: typeset, pageSize: CGSize(width: 300, height: 520))
+        let last = layout.characterRange(ofPage: layout.pageCount - 1)
+        XCTAssertEqual(NSMaxRange(last), typeset.text.length, "the last page ends at the end of the text")
+    }
+
+    /// The iPhone keeps a book it sent until the Mac really has it.
+    func testPhoneKeepsSentBookUntilTheMacHasIt() async throws {
+        guard #available(macOS 15.0, *) else { throw XCTSkip("needs macOS 15") }
+        let lib = temp()
+        let server = LibraryServer(library: lib, progress: ProgressStore(fileURL: lib.appendingPathComponent("p.json")), serviceName: "Habla on Test Mac")
+        let tls = try TLSIdentity.loadOrCreate(in: temp())
+        server.tlsIdentity = tls.identity; server.tlsFingerprint = tls.fingerprint
+        server.registry = DeviceRegistry(fileURL: temp().appendingPathComponent("devices.json"))
+        let window = PairingWindow()
+        server.pairing = window; server.libraryID = "lib-\(UUID().uuidString.prefix(6))"
+        let received = Locked<[URL]>([])
+        server.onInbox = { url in received.mutate { $0.append(url) } }   // a Mac that doesn't import (yet)
+        let port = try await server.start(port: 0, advertise: false)
+        defer { server.stop() }
+        let phone = PhoneStore(root: temp())
+        defer { phone.unpair() }
+        await phone.pair(at: URL(string: "https://127.0.0.1:\(port)")!, code: window.open())
+        XCTAssertTrue(phone.isConnected, phone.error ?? "")
+
+        phone.importBooks([Self.epub])
+        for _ in 0..<150 where received.value.isEmpty { try await Task.sleep(nanoseconds: 100_000_000) }
+        let sent = try XCTUnwrap(received.value.first, "the book reached the Mac's inbox · error=\(phone.error ?? "none") outbox=\(phone.outbox) importing=\(phone.importing)")
+        let id = try DocumentDigest.sha256Prefix(of: Self.epub)
+        await phone.sync()
+        XCTAssertTrue(phone.isWaitingForMac(id), "not in the Mac's library yet: still waiting")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: BookImporter.originalURL(for: id, in: phone.library).path), "the iPhone keeps its copy")
+
+        _ = try BookImporter().importEPUB(at: sent, into: lib)   // the Mac imports it
+        await phone.sync()
+        XCTAssertFalse(phone.isWaitingForMac(id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: BookImporter.originalURL(for: id, in: phone.library).path), "now the copy can go")
+    }
+
     func testImprintRecordsTheModel() async throws {
         let (_, b, _) = try await macLibrary()
         let m = try b.manifest()
@@ -280,4 +335,11 @@ final class AppFlowTests: XCTestCase {
         XCTAssertNotNil(player.message)
         XCTAssertFalse(saved.isEmpty, "seeks save the position")
     }
+}
+
+final class Locked<T>: @unchecked Sendable {
+    private var v: T; private let l = NSLock()
+    init(_ v: T) { self.v = v }
+    var value: T { l.withLock { v } }
+    func mutate(_ f: (inout T) -> Void) { l.withLock { f(&v) } }
 }

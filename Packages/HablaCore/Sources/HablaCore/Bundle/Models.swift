@@ -82,6 +82,8 @@ public struct FileEntry: Codable, Equatable, Hashable, Sendable {
     public var path: String
     public var size: Int
     public var sha256: String
+    /// When the file was last written on the Mac (lets re-indexing skip unchanged files).
+    public var modified: Date? = nil
 }
 
 // MARK: - Chapter text (text/chNNN.json)

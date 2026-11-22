@@ -120,6 +120,11 @@ public struct StaggeredCaps: View {
         }
         .foregroundStyle(color)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Read as words: "Good morning, keep listening", not "dash dash".
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(lines.map { $0.text.replacingOccurrences(of: "—", with: "").trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -244,6 +249,9 @@ public struct ProgressRing: View {
             Circle().trim(from: 0, to: min(1, max(0.02, value))).stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
+        .accessibilityElement()
+        .accessibilityLabel("Progress")
+        .accessibilityValue("\(Int((min(1, max(0, value)) * 100).rounded())) percent")
     }
 }
 
@@ -303,7 +311,7 @@ public struct CapsuleButton: View {
             Text(title).font(Theme.label(height > 40 ? 15 : 13)).foregroundStyle(Theme.ink)
                 .padding(.horizontal, height > 40 ? 20 : 16).frame(minHeight: height)
                 .background(Capsule().fill(fill))
-                .contentShape(Capsule())
+                .frame(minHeight: 44).contentShape(Rectangle())   // 44 pt to tap, whatever it looks like
         }
         .buttonStyle(.plain)
     }

@@ -60,6 +60,11 @@ public final class PhoneStore: ObservableObject {
         progress = ProgressStore(fileURL: base.appendingPathComponent("progress.json"))
         if let id = UserDefaults.standard.string(forKey: "habla.deviceID") { deviceID = id }
         else { deviceID = "iphone-" + UUID().uuidString.prefix(8).lowercased(); UserDefaults.standard.set(deviceID, forKey: "habla.deviceID") }
+        // Positions saved by an earlier version and never sent: send them on the next sync.
+        if !UserDefaults.standard.bool(forKey: "habla.pendingMigrated") {
+            UserDefaults.standard.set(true, forKey: "habla.pendingMigrated")
+            progress.markPending(progress.changed(since: lastPush).map(\.bookID))
+        }
         reloadLocal()
     }
 
@@ -153,20 +158,48 @@ public final class PhoneStore: ObservableObject {
         }
     }
 
+    /// When each waiting book was last sent (ids → time). The EPUB is only deleted from the
+    /// iPhone once the book shows up in the Mac's library, so a failed import never loses it.
+    private var sentAt: [String: Date] = (UserDefaults.standard.dictionary(forKey: "habla.outboxSent") as? [String: Date]) ?? [:] {
+        didSet { UserDefaults.standard.set(sentAt, forKey: "habla.outboxSent") }
+    }
+
     /// Sends waiting books to the Mac (runs on every sync too; quietly waits while it's away).
     func sendOutbox() async {
-        guard let client, !outbox.isEmpty else { return }
+        guard !outbox.isEmpty else { return }
+        // Arrived on the Mac: now the iPhone's copy of the original can go.
+        for id in outbox where remote.contains(where: { $0.id == id }) {
+            outbox.removeAll { $0 == id }
+            sentAt[id] = nil
+            try? FileManager.default.removeItem(at: BookImporter.originalURL(for: id, in: library))
+        }
+        guard let client else { return }
         for id in outbox {
             let epub = BookImporter.originalURL(for: id, in: library)
             guard FileManager.default.fileExists(atPath: epub.path) else { outbox.removeAll { $0 == id }; continue }
+            // Sent recently and the Mac is still importing it: give it time before sending again.
+            if let last = sentAt[id], Date().timeIntervalSince(last) < 3600, last <= Date() { continue }
             do {
                 try await client.sendBook(epub, filename: (manifest(id)?.title ?? id) + ".epub")
+                sentAt[id] = Date()
+            } catch SyncError.rejected(let why) {
                 outbox.removeAll { $0 == id }
-                try? FileManager.default.removeItem(at: epub)   // the Mac keeps the original now
+                sentAt[id] = nil
+                error = "“\(manifest(id)?.title ?? "A book")” stays on this iPhone: \(why)"
             } catch {
                 return   // Mac gone or busy: try again on the next sync
             }
         }
+    }
+
+    /// Voice models that narrated the downloaded books (for About Habla).
+    public var narrationModels: [String] {
+        var seen: [String] = []
+        for m in localManifests() {
+            for x in m.narrationModels where !seen.contains(x) { seen.append(x) }
+            if m.narrationModels.isEmpty, m.chapters.contains(where: { $0.audioStatus == .ready }), !seen.contains("Kokoro v1.0") { seen.append("Kokoro v1.0") }
+        }
+        return seen
     }
 
     public func isWaitingForMac(_ id: String) -> Bool { outbox.contains(id) }
@@ -176,8 +209,8 @@ public final class PhoneStore: ObservableObject {
     /// Saves locally at once; sends to the Mac in the background (coalesced).
     public func savePosition(book: String, chapter: Int, sentence: Int, audioTime: TimeInterval?, mode: ReadingPosition.Mode) {
         let fraction = manifest(book)?.fraction(chapter: chapter, sentence: sentence)
-        progress.merge(ReadingPosition(bookID: book, chapter: chapter, sentence: sentence, audioTime: audioTime,
-                                       mode: mode, deviceID: deviceID, fraction: fraction))
+        progress.record(ReadingPosition(bookID: book, chapter: chapter, sentence: sentence, audioTime: audioTime,
+                                        mode: mode, deviceID: deviceID, fraction: fraction))
         if let i = books.firstIndex(where: { $0.id == book }) { books[i].position = progress.position(for: book) }
         schedulePush()
     }
@@ -440,12 +473,14 @@ public final class PhoneStore: ObservableObject {
     /// Downloads (or updates) a book from the Mac. Interrupted downloads resume: files
     /// already verified are kept, and the manifest is written last.
     /// Re-checks every file of a book against the Mac (fixes silently damaged downloads).
-    public func repair(_ id: String) async {
-        guard let client else { error = "Open Habla on your Mac to repair this book."; return }
+    /// Returns true when damaged files were actually replaced (then reloading helps).
+    @discardableResult
+    public func repair(_ id: String) async -> Bool {
+        guard let client else { return false }
         updating.insert(id)
         defer { updating.remove(id); reloadLocal() }
-        do { _ = try await client.syncBook(id, into: library, verify: true) }
-        catch { self.error = "Couldn't repair the book: \(Self.describe(error))" }
+        do { return try await client.syncBook(id, into: library, verify: true).filesDownloaded > 0 }
+        catch { return false }
     }
 
     public func download(_ id: String, silent: Bool = false) async throws {

@@ -13,7 +13,7 @@ public enum Theme {
     /// The one accent: soft light blue. Fills, rims, highlights, buttons.
     public static let accent = Color(hex: "#A7BFD6")
     /// Accent used as *text* — deeper on light backgrounds so it stays readable.
-    public static var accentText: Color { isLight ? Color(hex: "#557795") : accent }
+    public static var accentText: Color { isLight ? Color(hex: "#4A6985") : accent }   // ≥4.5:1 on paper and surface
     /// Dark ink for text sitting on the accent (both appearances).
     public static let ink = Color(hex: "#1F1E1C")
 
@@ -21,7 +21,8 @@ public enum Theme {
     public static var surface: Color { isLight ? Color(hex: "#ECE9E3") : Color(hex: "#2A2926") }
     public static var hairline: Color { isLight ? Color.black.opacity(0.08) : Color.white.opacity(0.10) }
     public static var text: Color { isLight ? Color(hex: "#1F1E1C") : Color(hex: "#EEE9E1") }
-    public static var textDim: Color { text.opacity(isLight ? 0.5 : 0.5) }
+    /// Secondary text: 65% ink keeps WCAG AA (≥4.5:1) on paper and on surfaces.
+    public static var textDim: Color { text.opacity(0.65) }
     public static var appAccent: Color { accent }
 
     // MARK: Type

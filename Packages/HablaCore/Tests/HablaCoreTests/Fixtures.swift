@@ -77,4 +77,35 @@ enum Fixtures {
         try! sampleEPUB().write(to: url)
         return url
     }
+
+    /// A custom EPUB: chapters as (file name, raw bytes), a nav TOC listing `toc` files.
+    static func customEPUB(title: String = "Custom", chapters: [(String, Data)], toc: [String]) -> Data {
+        let items = chapters.enumerated().map { i, c in "<item id=\"c\(i)\" href=\"\(c.0)\" media-type=\"application/xhtml+xml\"/>" }.joined()
+        let spine = chapters.indices.map { "<itemref idref=\"c\($0)\"/>" }.joined()
+        let nav = xhtml("<nav epub:type=\"toc\"><ol>" + toc.map { "<li><a href=\"\($0)\">\($0)</a></li>" }.joined() + "</ol></nav>")
+        let opf = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>\(title)</dc:title><dc:creator>Test</dc:creator><dc:language>en</dc:language></metadata>
+          <manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>\(items)</manifest>
+          <spine>\(spine)</spine>
+        </package>
+        """
+        var zip = ZipWriter()
+        zip.add("mimetype", data: Data("application/epub+zip".utf8))
+        zip.add("META-INF/container.xml", data: Data("""
+        <?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+        <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>
+        """.utf8))
+        zip.add("OEBPS/content.opf", data: Data(opf.utf8))
+        zip.add("OEBPS/nav.xhtml", data: Data(nav.utf8))
+        for (name, data) in chapters { zip.add("OEBPS/\(name)", data: data) }
+        return zip.finalize()
+    }
+
+    static func write(_ data: Data, named name: String, in dir: URL) -> URL {
+        let url = dir.appendingPathComponent(name)
+        try! data.write(to: url)
+        return url
+    }
 }

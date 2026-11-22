@@ -5,6 +5,8 @@ public enum SyncError: Error, CustomStringConvertible, Equatable {
     case http(Int, String), unreachable(String), integrity(String), pairing(String)
     /// The Mac doesn't know this device (never paired, or forgotten on the Mac).
     case notPaired
+    /// The Mac refused what was sent, for good (retrying won't help).
+    case rejected(String)
     public var description: String {
         switch self {
         case .http(let code, let path): return "Server returned \(code) for \(path)"
@@ -12,6 +14,7 @@ public enum SyncError: Error, CustomStringConvertible, Equatable {
         case .integrity(let p): return "Downloaded file failed its checksum: \(p)"
         case .pairing(let m): return m
         case .notPaired: return "This iPhone isn't paired with that Mac."
+        case .rejected(let m): return m
         }
     }
 }
@@ -67,6 +70,11 @@ public struct SyncClient: Sendable {
     func syncBookOnce(_ id: String, into library: URL, verify: Bool,
                       progress: (@Sendable (_ done: Int, _ total: Int) -> Void)?) async throws -> SyncSummary {
         let remote = try await manifest(id)
+        // Never let a manifest point outside this book's folder.
+        guard BookBundle.isSafeRelativePath(id), !id.contains("/"),
+              let bad = Optional(remote.files.first { !BookBundle.isSafeRelativePath($0.path) }), bad == nil else {
+            throw SyncError.integrity("unsafe file path in the book from the Mac")
+        }
         let bundle = BookBundle(url: BookBundle.url(for: id, in: library))
         let local = try? bundle.manifest()
         let localHashes = Dictionary((local?.files ?? []).map { ($0.path, $0.sha256) }, uniquingKeysWith: { a, _ in a })
@@ -131,12 +139,15 @@ public struct SyncClient: Sendable {
     // MARK: Progress
 
     /// Sends local positions and adopts any newer ones from the Mac.
+    /// Sends this device's pending changes, then takes the Mac's positions for everything else.
+    /// The Mac decides (latest wins, with its own clock), so devices converge even when their
+    /// clocks disagree. `since` is kept for older callers and ignored.
     public func syncProgress(_ store: ProgressStore, since: Date? = nil) async throws {
-        for local in store.changed(since: since) {
+        for (local, change) in store.pending {
             let winner = try await sendJSON(ReadingPosition.self, "v1/progress", method: "PUT", body: local)
-            store.merge(winner)
+            store.acknowledge(winner, change: change)
         }
-        for remote in try await getJSON([ReadingPosition].self, "v1/progress") { store.merge(remote) }
+        for remote in try await getJSON([ReadingPosition].self, "v1/progress") { store.adopt(remote) }
     }
 
     // MARK: Pairing
@@ -171,6 +182,7 @@ public struct SyncClient: Sendable {
         let response: URLResponse
         do { (_, response) = try await session.upload(for: r, from: data) }
         catch { throw SyncError.unreachable(error.localizedDescription) }
+        if (response as? HTTPURLResponse)?.statusCode == 415 { throw SyncError.rejected("Your Mac couldn't open this file as an EPUB.") }
         try check(response, "v1/inbox/\(id)")
         return id
     }

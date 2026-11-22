@@ -68,10 +68,12 @@ public struct BookImporter {
         struct Draft {
             var title: String; var blocks: [TextBlock]; var frontMatter: Bool
             var spineIndex: Int; var href: String; var words: Int
+            /// Front matter only because it's short and untitled (a guess, not a declaration).
+            var guessedFront = false
         }
         var drafts: [Draft] = []
         var untitledCount = 0
-        let tocIsUsable = Set(package.toc.map(\.href)).count >= 3
+        let tocIsUsable = Set(package.toc.map(\.href)).count >= 2
         for spineItem in package.spine {
             let item = spineItem.item
             guard item.mediaType.contains("html") || item.href.hasSuffix("html") || item.href.hasSuffix(".htm"),
@@ -100,12 +102,27 @@ public struct BookImporter {
             let front = isFront
                 || (title == nil && words < 120 && beforeStory)
                 || title.map { t in Self.frontMatterTitles.contains { t.lowercased().hasPrefix($0) } } == true
+            // Declared front matter (by the book itself), as opposed to a guess from length.
+            let declared = isFront || title.map { t in Self.frontMatterTitles.contains { t.lowercased().hasPrefix($0) } } == true
             if title == nil {
                 untitledCount += front ? 0 : 1
                 title = front ? "Front matter" : "Chapter \(untitledCount)"
             }
             drafts.append(Draft(title: title!, blocks: result.blocks, frontMatter: front,
-                                spineIndex: spineItem.index, href: item.href, words: words))
+                                spineIndex: spineItem.index, href: item.href, words: words,
+                                guessedFront: front && !declared))
+        }
+
+        guard drafts.contains(where: { $0.words > 0 }) else { throw EPUBError.noText }
+        // A short book (a story, an essay) can be all "short untitled pages": if nothing was left
+        // to narrate, those pages are the book, not front matter.
+        if !drafts.contains(where: { !$0.frontMatter }) {
+            var n = 0
+            for i in drafts.indices where drafts[i].guessedFront && drafts[i].words > 0 {
+                n += 1
+                drafts[i].frontMatter = false
+                drafts[i].title = drafts.filter(\.guessedFront).count == 1 ? package.title : "Part \(n)"
+            }
         }
 
         // Sentences + spoken text, then write each chapter.

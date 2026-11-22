@@ -1,7 +1,7 @@
 import Foundation
 
 public enum EPUBError: Error, CustomStringConvertible {
-    case missingContainer, missingPackage(String), invalidPackage(String), drmProtected
+    case missingContainer, missingPackage(String), invalidPackage(String), drmProtected, noText
 
     public var description: String {
         switch self {
@@ -9,6 +9,7 @@ public enum EPUBError: Error, CustomStringConvertible {
         case .missingPackage(let p): return "Package document not found: \(p)"
         case .invalidPackage(let s): return "Invalid package document: \(s)"
         case .drmProtected: return "This EPUB is DRM-protected. Only DRM-free books can be imported."
+        case .noText: return "This book has no text Habla can read (it may be made of images only)."
         }
     }
 }

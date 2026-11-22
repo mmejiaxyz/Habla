@@ -30,6 +30,9 @@ public struct StudioWindowView: View {
             }
         }
         .background(Theme.screen)
+        // Up/down arrows move through the library.
+        .onKeyPress(.downArrow) { moveSelection(1); return .handled }
+        .onKeyPress(.upArrow) { moveSelection(-1); return .handled }
         .onDrop(of: [.fileURL], isTargeted: $dropping) { providers in
             Task {
                 var urls: [URL] = []
@@ -54,6 +57,12 @@ public struct StudioWindowView: View {
         } message: { Text(Features.xteink ? "Copies already on your iPhone or Xteink stay there." : "A copy already on your iPhone stays there.") }
     }
 
+    func moveSelection(_ step: Int) {
+        guard !store.books.isEmpty else { return }
+        let i = store.books.firstIndex { $0.id == store.selection } ?? -step
+        store.selection = store.books[max(0, min(store.books.count - 1, i + step))].id
+    }
+
     // MARK: Sidebar
 
     var sidebar: some View {
@@ -62,13 +71,14 @@ public struct StudioWindowView: View {
                 Text("HABLA").font(Theme.label(10)).tracking(1.4).foregroundStyle(Theme.text)
                 Spacer()
                 Button { showImporter = true } label: { Image(systemName: "plus").font(.system(size: 15, weight: .medium)).frame(width: 32, height: 32).contentShape(Rectangle()) }
-                    .buttonStyle(.plain).foregroundStyle(Theme.accentText).help("Add EPUB books")
+                    .buttonStyle(.plain).foregroundStyle(Theme.accentText).help("Add EPUB books").accessibilityLabel("Add books")
             }
             .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 18)
 
             dropZone.padding(.horizontal, 20)
 
             CapsLabel("Library").padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 6)
+                .accessibilityAddTraits(.isHeader)
             Scroll {
                 VStack(spacing: 2) {
                     ForEach(store.books, id: \.id) { m in libraryRow(m) }
@@ -103,18 +113,21 @@ public struct StudioWindowView: View {
 
     func libraryRow(_ m: BookManifest) -> some View {
         let selected = m.id == store.selection
-        return HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(m.title).font(Theme.display(18)).foregroundStyle(Theme.text).lineLimit(1)
-                Text(m.author).font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).lineLimit(1)
+        return Button { store.selection = m.id } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(m.title).font(Theme.display(18)).foregroundStyle(Theme.text).lineLimit(1)
+                    Text(m.author).font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                status(m)
             }
-            Spacer(minLength: 6)
-            status(m)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(selected ? Theme.surface : .clear))
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(selected ? Theme.surface : .clear))
-        .contentShape(Rectangle())
-        .onTapGesture { store.selection = m.id }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
         .contextMenu {
             Button("Read") { openReader(m.id) }
             Button("Show original in Finder") { NSWorkspace.shared.activateFileViewerSelecting([BookImporter.originalURL(for: m.id, in: store.library)]) }
@@ -209,10 +222,10 @@ public struct StudioWindowView: View {
                     Text("A new version of Habla is ready").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                     Text(updater.canInstall ? "Build \(build). Restart now, or it installs the next time you quit."
                                             : "Build \(build). Move Habla to your Applications folder to update it automatically.")
-                        .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.65))
+                        .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.85))
                 }
                 Spacer()
-                CapsuleButton(updater.canInstall ? "Restart" : "Download", fill: Theme.screen.opacity(0.7)) { updater.installAndRelaunch() }
+                CapsuleButton(updater.canInstall ? "Restart" : "Open download page", fill: Theme.screen.opacity(0.7)) { updater.installAndRelaunch() }
             }
             .padding(.horizontal, 24).padding(.vertical, 14)
             .background(Theme.accent.opacity(0.55))
@@ -237,17 +250,17 @@ public struct StudioWindowView: View {
                 switch store.kokoro {
                 case .installing(let step):
                     Text("Installing the voice engine…").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
-                    Text(step).font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.65))
+                    Text(step).font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.85))
                 case .failed(let msg):
                     Text("The voice engine couldn't be installed").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
-                    Text(msg).font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.65)).lineLimit(2)
+                    Text(msg).font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.85)).lineLimit(2)
                         .help(store.kokoroLog.suffix(15).joined(separator: "\n"))
                 case .checking:
                     Text("Checking the voice engine…").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                 default:
                     Text("Install the voice engine to narrate books").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                     Text("Kokoro runs on this Mac, free and offline. One download of about 350 MB — nothing else to install.")
-                        .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.65))
+                        .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.85))
                 }
             }
             Spacer()
@@ -290,9 +303,6 @@ public struct StudioWindowView: View {
                 Scroll {
                     VStack(spacing: 0) { ForEach(store.voices, id: \.self) { v in voiceRow(v, book: m) } }
                 }
-                Text("Engine: \(store.engineDescription)")
-                    .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).padding(.top, 10)
-                ImprintView(manifest: m).padding(.top, 22)
             }
             .frame(width: 340)
 
@@ -357,7 +367,7 @@ public struct StudioWindowView: View {
         if active && !store.paused {
             pill("Pause") { store.pauseNarration() }
         } else if queued && store.paused {
-            pill("Resume") { store.resumeNarration() }
+            pill("Resume") { store.resumeNarration(m.id) }
         } else if queued {
             pill("Cancel", filled: false) { store.cancelNarration(m.id) }
         } else if !item.isFullyNarrated {
@@ -377,21 +387,29 @@ public struct StudioWindowView: View {
         let on = store.voice(for: m) == v
         return VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Circle().strokeBorder(on ? Theme.accentText : Theme.text.opacity(0.25), lineWidth: on ? 5 : 1).frame(width: 16, height: 16)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(voiceName(v)).font(Theme.grotesk(15)).foregroundStyle(Theme.text)
-                    Text(voiceNote(v)).font(Theme.grotesk(12)).foregroundStyle(Theme.textDim)
+                Button { if !on { store.setVoice(v, for: m) } } label: {
+                    HStack(spacing: 12) {
+                        Circle().strokeBorder(on ? Theme.accentText : Theme.text.opacity(0.25), lineWidth: on ? 5 : 1).frame(width: 16, height: 16)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(voiceName(v)).font(Theme.grotesk(15)).foregroundStyle(Theme.text)
+                            Text(voiceNote(v)).font(Theme.grotesk(12)).foregroundStyle(Theme.textDim)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
                 }
-                Spacer()
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(voiceName(v)), \(voiceNote(v))")
+                .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
                 TextLinkButton(store.previewing == v ? "Playing…" : "▶ Preview", size: 12) { store.preview(v) }
                     .disabled(store.kokoro != .ready || store.previewing != nil)
                     .help(store.kokoro == .ready ? "Hear this voice" : "Install the voice engine first")
+                    .accessibilityLabel(store.previewing == v ? "Playing \(voiceName(v))" : "Preview \(voiceName(v))")
             }
-            .padding(.vertical, 10)
             Hairline()
         }
-        .contentShape(Rectangle())
-        .onTapGesture { if !on { store.setVoice(v, for: m) } }
     }
 
     func voiceName(_ v: String) -> String { Imprint.voiceName(v) }
@@ -405,7 +423,7 @@ public struct StudioWindowView: View {
         let isNow = r?.chapterIndex == c.index && c.audioStatus == .pending
         let state: (String, Color) = c.audioStatus == .ready ? ("✓ \(c.duration.map(Format.duration) ?? "")", Theme.textDim)
             : isNow ? ("Narrating · \(Int(Double(r!.sentence) / Double(max(1, r!.sentenceCount)) * 100))%", Theme.accentText)
-            : (queued ? "Waiting" : "Not narrated", Theme.textDim.opacity(0.7))
+            : (queued ? "Waiting" : "Not narrated", Theme.textDim)
         return VStack(spacing: 0) {
             HStack {
                 Text(ChapterNaming.title(c)).font(Theme.grotesk(15)).foregroundStyle(c.audioStatus == .ready || isNow ? Theme.text : Theme.textDim).lineLimit(1)
@@ -423,6 +441,7 @@ public struct StudioReaderWindow: View {
     @StateObject private var model: ReaderModel
     @ObservedObject var player: NarrationPlayer
     var dismiss: () -> Void
+    @Environment(\.dismiss) private var closeWindow
 
     public init(store: StudioStore, bookID: String, player: NarrationPlayer, dismiss: @escaping () -> Void) {
         let bundle = BookBundle(url: BookBundle.url(for: bookID, in: store.library))
@@ -434,7 +453,7 @@ public struct StudioReaderWindow: View {
         model.onPosition = { [weak store, weak player] c, s in
             if player?.bookID == bookID, player?.isPlaying == true { return }
             guard FileManager.default.fileExists(atPath: bundle.fileURL(BookBundle.manifestFile).path) else { return }   // deleted
-            store?.progress.merge(ReadingPosition(bookID: bookID, chapter: c, sentence: s, mode: .reading, deviceID: "mac",
+            store?.progress.record(ReadingPosition(bookID: bookID, chapter: c, sentence: s, mode: .reading, deviceID: "mac",
                                                   fraction: m.fraction(chapter: c, sentence: s)))
         }
         _model = StateObject(wrappedValue: model)
@@ -443,7 +462,8 @@ public struct StudioReaderWindow: View {
     }
 
     public var body: some View {
-        ReaderView(model: model, player: player, onClose: dismiss, onStyle: { StudioReaderWindow.saveStyle($0) })
+        // Close (and Escape) close this reader window.
+        ReaderView(model: model, player: player, onClose: { dismiss(); closeWindow() }, onStyle: { StudioReaderWindow.saveStyle($0) })
             .frame(minWidth: 900, minHeight: 600)
             .navigationTitle(model.manifest.title)
     }
@@ -483,7 +503,7 @@ public struct PairingSheet: View {
                     .foregroundStyle(Theme.text).textSelection(.enabled).padding(.leading, 26)
                 TimelineView(.periodic(from: .now, by: 1)) { ctx in
                     let left = max(0, Int(pairing.expires.timeIntervalSince(ctx.date)))
-                    Text(left > 0 ? "Works once, for \(left / 60):\(String(format: "%02d", left % 60))" : "This code expired")
+                    Text(left > 0 ? "Works once · expires in \(left / 60):\(String(format: "%02d", left % 60))" : "This code expired")
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).monospacedDigit()
                 }.padding(.leading, 26)
                 Text(encrypted ? "Only paired devices can see your books. Everything between them and this Mac is encrypted."

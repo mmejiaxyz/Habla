@@ -52,7 +52,7 @@ struct StudioApp: App {
                     updater.start()
                     player.onPosition = { [weak store] book, chapter, sentence, time in
                         guard let store, let m = store.books.first(where: { $0.id == book }) else { return }
-                        store.progress.merge(.init(bookID: book, chapter: chapter, sentence: sentence, audioTime: time,
+                        store.progress.record(.init(bookID: book, chapter: chapter, sentence: sentence, audioTime: time,
                                                    mode: .listening, deviceID: "mac", fraction: m.fraction(chapter: chapter, sentence: sentence)))
                     }
                 }
@@ -60,6 +60,14 @@ struct StudioApp: App {
         .defaultSize(width: 1240, height: 800)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .appInfo) {
+                Button("About Habla") {
+                    let credits = NSAttributedString(string: store.aboutCredits, attributes: [
+                        .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+                    NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { Task { await updater.check(userInitiated: true) } }
                 Toggle("Open at Login", isOn: Binding(get: { openAtLogin }, set: { on in

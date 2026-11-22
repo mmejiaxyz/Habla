@@ -120,7 +120,8 @@ do {
         let only = option("chapters").map { Set($0.split(separator: ",").compactMap { Int($0) }) }
         let engineName = option("engine") ?? "kokoro"
         let engine: TTSEngine = engineName == "tone" ? ToneEngine()
-            : EnginePool((0..<EnginePool.recommendedWorkers).map { _ in KokoroEngine(configuration: .init(toolsDirectory: kokoroDir)) })
+            : EnginePool((0..<EnginePool.recommendedWorkers(fastModel: KokoroEngine.Configuration(toolsDirectory: kokoroDir).model.lastPathComponent == KokoroEngine.Configuration.fastModel))
+                .map { _ in KokoroEngine(configuration: .init(toolsDirectory: kokoroDir)) })
         let pipeline = RenderPipeline(engine: engine, cacheDirectory: cacheDir)
         let b = bundle(args[0])
         let start = Date()
@@ -142,6 +143,7 @@ do {
         let server = LibraryServer(library: library, progress: ProgressStore(fileURL: progressFile),
                                    serviceName: "Habla on \(Host.current().localizedName ?? "Mac")", accessToken: option("token"))
         server.onEvent = { print("  \($0)") }
+        server.allowEReaders = true   // `habla serve` is the e-reader (KOReader/OPDS) server
         // Xteink sync password (created by `habla xteink setup`); KOSync sends its MD5.
         if let d = try? Data(contentsOf: dataDir.appendingPathComponent(customLibrary == nil ? "xteink.json" : ".xteink.json")),
            let c = try? JSONDecoder().decode([String: String].self, from: d), let pw = c["password"] {

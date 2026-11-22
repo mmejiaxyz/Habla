@@ -70,6 +70,10 @@ public final class RenderPipeline: @unchecked Sendable {
             func launch(_ k: Int) {
                 guard k < plan.count, ahead[k] == nil else { return }
                 let text = plan[k].spoken
+                if text.isEmpty {
+                    ahead[k] = Task { (SpeechAudio(samples: [Float](repeating: 0, count: 7_200), sampleRate: 24_000), true) }
+                    return
+                }
                 ahead[k] = Task { try await self.sentenceAudioWithRetry(text, voice: voice) }
             }
             defer { ahead.values.forEach { $0.cancel() } }
@@ -171,8 +175,10 @@ public final class RenderPipeline: @unchecked Sendable {
                 continue
             }
             for (j, s) in block.sentences.enumerated() {
-                let spoken = s.spoken ?? block.substring(s.range)
-                guard spoken.contains(where: { $0.isLetter || $0.isNumber }) else { continue }
+                var spoken = s.spoken ?? block.substring(s.range)
+                // Nothing to say (only emoji or symbols): keep the sentence as a short silence, so
+                // every sentence has a timing and highlights/seeking stay aligned with the text.
+                if !spoken.contains(where: { $0.isLetter || $0.isNumber }) { spoken = "" }
                 let last = j == block.sentences.count - 1
                 let pause: TimeInterval
                 switch (last, block.kind) {

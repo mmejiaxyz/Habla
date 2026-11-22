@@ -19,7 +19,7 @@ public final class NarrationPlayer: ObservableObject {
     @Published public private(set) var time: TimeInterval = 0
     @Published public private(set) var duration: TimeInterval = 0
     @Published public private(set) var isPlaying = false
-    @Published public private(set) var message: String?
+    @Published public internal(set) var message: String?
     @Published public var rate: Double = UserDefaults.standard.object(forKey: "habla.rate") as? Double ?? 1.0 {
         didSet { UserDefaults.standard.set(rate, forKey: "habla.rate"); if isPlaying { player?.rate = Float(rate) }; updateNowPlaying() }
     }
@@ -34,7 +34,7 @@ public final class NarrationPlayer: ObservableObject {
     public var onPosition: ((String, Int, Int, TimeInterval) -> Void)?
 
     private var bundle: BookBundle?
-    private var manifest: BookManifest?
+    private(set) var manifest: BookManifest?
     private var timing: ChapterTiming?
     private var player: AVPlayer?
     private var observer: Any?
@@ -94,7 +94,7 @@ public final class NarrationPlayer: ObservableObject {
             Task { @MainActor in
                 guard let self, let id = self.bookID else { return }
                 self.isPlaying = false
-                self.message = "This chapter's audio is damaged. Repairing it from your Mac…"
+                self.message = "This chapter's audio is damaged. Trying to repair it from your Mac…"
                 self.onDamaged?(id)
             }
         }

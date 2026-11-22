@@ -74,8 +74,49 @@ enum XMLTree {
     static func parse(_ string: String) -> XNode? { parse(Data(string.utf8)) }
 
     /// Replace HTML named entities (undefined in plain XML) with numeric references.
+    /// Text of an XHTML/XML file in whatever encoding it uses: UTF-16 (BOM), UTF-8, or the
+    /// encoding it declares (ISO-8859-1, Windows-1252, …). The declaration is rewritten to UTF-8
+    /// because the result is parsed as UTF-8.
+    static func decode(_ data: Data) -> String {
+        var text: String?
+        let b = [UInt8](data.prefix(4))
+        if b.count >= 2, (b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF) {
+            text = String(data: data, encoding: .utf16)
+        } else if b.count >= 4, b[0] == 0x3C, b[1] == 0x00, b[2] == 0x3F, b[3] == 0x00 {
+            text = String(data: data, encoding: .utf16LittleEndian)       // "<?" in UTF-16 LE, no BOM
+        } else if b.count >= 4, b[0] == 0x00, b[1] == 0x3C, b[2] == 0x00, b[3] == 0x3F {
+            text = String(data: data, encoding: .utf16BigEndian)
+        }
+        if text == nil { text = String(data: data, encoding: .utf8) }
+        if text == nil, let declared = declaredEncoding(data) { text = String(data: data, encoding: declared) }
+        var s = text ?? String(data: data, encoding: .windowsCP1252) ?? String(decoding: data, as: UTF8.self)
+        // The text is UTF-8 from here on: make the XML declaration say so.
+        if let r = s.range(of: #"(<\?xml[^>]*encoding\s*=\s*["'])[^"']+(["'])"#, options: .regularExpression),
+           s.distance(from: s.startIndex, to: r.lowerBound) < 200 {
+            s = s.replacingOccurrences(of: #"encoding\s*=\s*["'][^"']+["']"#, with: "encoding=\"UTF-8\"",
+                                       options: .regularExpression, range: r)
+        }
+        return s
+    }
+
+    /// `<?xml … encoding="…"?>` or `<meta charset="…">` near the top of the file.
+    static func declaredEncoding(_ data: Data) -> String.Encoding? {
+        let head = String(decoding: data.prefix(1024), as: UTF8.self)
+        let patterns = [#"encoding\s*=\s*["']([A-Za-z0-9_\-:.]+)["']"#, #"charset\s*=\s*["']?([A-Za-z0-9_\-:.]+)"#]
+        for p in patterns {
+            guard let r = head.range(of: p, options: [.regularExpression, .caseInsensitive]) else { continue }
+            let match = String(head[r])
+            guard let q = match.range(of: #"[A-Za-z0-9_\-:.]+["']?$"#, options: .regularExpression) else { continue }
+            let name = match[q].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            let cf = CFStringConvertIANACharSetNameToEncoding(name as CFString)
+            guard cf != kCFStringEncodingInvalidId else { continue }
+            return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
+        }
+        return nil
+    }
+
     static func sanitize(_ data: Data) -> Data {
-        var s = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+        var s = decode(data)
         // XMLParser drops U+FEFF (zero-width no-break space) inside text; e-readers count it.
         // U+2060 (word joiner) is the same invisible character and survives parsing.
         if s.unicodeScalars.contains("\u{FEFF}") {

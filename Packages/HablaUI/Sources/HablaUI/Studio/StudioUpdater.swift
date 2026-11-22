@@ -53,23 +53,37 @@ public final class StudioUpdater: ObservableObject {
 
     /// Looks for a newer release and downloads it. `userInitiated` reports "up to date" / errors.
     public func check(userInitiated: Bool = false) async {
-        switch state { case .checking, .downloading, .ready: return; default: break }
+        var stagedBuild: Int?
+        switch state {
+        case .checking, .downloading: return
+        case .ready(let b):
+            // Keep looking: a newer release replaces the one waiting to be installed.
+            guard let staged, FileManager.default.fileExists(atPath: staged.path) else { state = .idle; return await check(userInitiated: userInitiated) }
+            stagedBuild = b
+        default: break
+        }
         guard !isDevelopmentBuild else {
             if userInitiated { state = .failed("Updates are off for development builds.") }
             return
         }
-        state = .checking
-        guard let update = await AppUpdate.available(installed: installedBuild) else {
+        if stagedBuild == nil { state = .checking }
+        guard let update = await AppUpdate.available(installed: stagedBuild ?? installedBuild) else {
+            if let b = stagedBuild { state = .ready(build: b); return }
             state = userInitiated ? .failed("Habla is up to date (build \(installedBuild)).") : .idle
             return
         }
         guard let zip = update.assets["Habla-Mac.zip"] ?? update.assets["Habla-Studio.zip"] else { state = .idle; return }
         state = .downloading(build: update.build)
+        let previous = staged
         do {
             staged = try await download(zip, build: update.build)
             state = .ready(build: update.build)
         } catch {
-            state = userInitiated ? .failed("Couldn't download the update: \(error.localizedDescription)") : .idle
+            if let b = stagedBuild, let previous, FileManager.default.fileExists(atPath: previous.path) {
+                staged = previous; state = .ready(build: b)          // keep the one already waiting
+            } else {
+                state = userInitiated ? .failed("Couldn't download the update: \(error.localizedDescription)") : .idle
+            }
         }
     }
 
@@ -77,6 +91,13 @@ public final class StudioUpdater: ObservableObject {
 
     func download(_ url: URL, build: Int) async throws -> URL {
         let fm = FileManager.default
+        let folder = self.folder.appendingPathComponent("build-\(build)-dl", isDirectory: true)
+        // Older downloads are no longer needed (the one waiting is replaced only on success).
+        for old in (try? fm.contentsOfDirectory(at: self.folder, includingPropertiesForKeys: nil)) ?? []
+        where old.lastPathComponent != folder.lastPathComponent && old.path != staged?.deletingLastPathComponent().deletingLastPathComponent().path
+            && staged.map({ !$0.path.hasPrefix(old.path + "/") }) ?? true {
+            try? fm.removeItem(at: old)
+        }
         try? fm.removeItem(at: folder)
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         let (tmp, resp) = try await URLSession.shared.download(from: url)
@@ -118,6 +139,35 @@ public final class StudioUpdater: ObservableObject {
         guard !installing, case .ready = state, let staged, canInstall,
               FileManager.default.fileExists(atPath: staged.path) else { return false }
         installing = true
+        let fm = FileManager.default
+        let current = Bundle.main.bundlePath
+        let parent = (current as NSString).deletingLastPathComponent
+        // Takes the new name if the app was renamed (Habla Studio.app → Habla.app).
+        let target = (parent as NSString).appendingPathComponent(staged.lastPathComponent)
+
+        // Preferred: put the new app next to the old one and exchange the two in one atomic
+        // step. Whatever happens next (crash, power cut), there is always a complete Habla.
+        let incoming = (parent as NSString).appendingPathComponent(".Habla-update.app")
+        try? fm.removeItem(atPath: incoming)
+        if (try? fm.moveItem(atPath: staged.path, toPath: incoming)) != nil,
+           renamex_np(incoming, current, UInt32(RENAME_SWAP)) == 0 {
+            let cleanup = """
+            PID="$1"; OLD="$2"; NEW="$3"; RELAUNCH="$4"; TARGET="$5"
+            while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
+            rm -rf "$OLD"
+            if [ "$TARGET" != "$NEW" ] && [ ! -e "$TARGET" ]; then mv "$NEW" "$TARGET" || TARGET="$NEW"; else TARGET="$NEW"; fi
+            [ "$RELAUNCH" = 1 ] && open "$TARGET"
+            exit 0
+            """
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", cleanup, "habla-update", String(ProcessInfo.processInfo.processIdentifier),
+                           incoming, current, relaunch ? "1" : "0", target]
+            if (try? p.run()) != nil { return true }
+            return true   // the new app is already in place; it opens next time
+        }
+        // Fallback (e.g. a different disk): move the old one aside, move the new one in.
+        if !fm.fileExists(atPath: staged.path), fm.fileExists(atPath: incoming) { try? fm.moveItem(atPath: incoming, toPath: staged.path) }
         let script = """
         PID="$1"; OLD="$2"; NEW="$3"; RELAUNCH="$4"; TARGET="$5"
         while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done

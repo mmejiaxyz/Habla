@@ -130,6 +130,9 @@ public actor KokoroEngine: TTSEngine {
         try? FileManager.default.removeItem(at: scratch)
     }
 
+    /// How long the worker may take to load the model before it's considered stuck.
+    public static var startTimeout: TimeInterval = 90
+
     private func start() async throws {
         if process?.isRunning == true { return }
         signal(SIGPIPE, SIG_IGN)   // a dead worker must not take the app down with it
@@ -147,18 +150,33 @@ public actor KokoroEngine: TTSEngine {
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe
         p.standardOutput = outPipe
-        // Keep the worker's own messages for diagnosis (worker.log next to the worker).
+        // Keep the worker's own messages for diagnosis (worker.log next to the worker). Appended,
+        // so a restart after a crash keeps the crash; trimmed when it grows past 1 MB.
         let logURL = config.worker.deletingLastPathComponent().appendingPathComponent("worker.log")
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        p.standardError = (try? FileHandle(forWritingTo: logURL)) ?? FileHandle.nullDevice
+        if ((try? fm.attributesOfItem(atPath: logURL.path)[.size] as? Int) ?? 0) > 1_000_000 {
+            try? fm.removeItem(at: logURL)
+        }
+        if !fm.fileExists(atPath: logURL.path) { fm.createFile(atPath: logURL.path, contents: nil) }
+        let log = try? FileHandle(forWritingTo: logURL)
+        _ = try? log?.seekToEnd()
+        try? log?.write(contentsOf: Data("\n--- worker started \(Date().formatted(.iso8601)) ---\n".utf8))
+        p.standardError = log ?? FileHandle.nullDevice
         try p.run()
         process = p
         stdin = inPipe.fileHandleForWriting
         lines = LineReader(outPipe.fileHandleForReading)
 
+        // Loading the model takes a few seconds; a worker that hangs here (damaged model, stuck
+        // disk) is stopped instead of blocking narration forever.
+        let starting = p
+        let watchdog = Task {
+            try? await Task.sleep(nanoseconds: UInt64(Self.startTimeout * 1_000_000_000))
+            if !Task.isCancelled { starting.terminate() }
+        }
+        defer { watchdog.cancel() }
         guard let ready = try await nextMessage(), ready["ready"] as? Bool == true else {
             await shutdown()
-            throw TTSError.engineUnavailable("Kokoro worker failed to start")
+            throw TTSError.engineUnavailable("The voice engine didn't start. Try installing it again.")
         }
         availableVoices = ready["voices"] as? [String] ?? []
     }

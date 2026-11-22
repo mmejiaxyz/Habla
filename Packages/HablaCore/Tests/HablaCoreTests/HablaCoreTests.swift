@@ -350,6 +350,7 @@ final class KOReaderTests: XCTestCase {
         let m = try bundle.manifest()
         let server = LibraryServer(library: mac, progress: ProgressStore(fileURL: mac.appendingPathComponent("p.json")))
         server.koreaderKeyMD5 = KOReaderDigest.filename("secret")   // MD5("secret")
+        server.allowEReaders = true
         let port = try await server.start(port: 0, advertise: false)
         defer { server.stop() }
         let base = URL(string: "http://127.0.0.1:\(port)")!

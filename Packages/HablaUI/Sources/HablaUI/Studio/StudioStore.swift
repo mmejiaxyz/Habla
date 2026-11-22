@@ -177,14 +177,25 @@ public final class StudioStore: ObservableObject {
     /// What new narration uses right now, e.g. "Kokoro v1.0 · fast (int8) · 2 workers".
     public var engineDescription: String {
         let model = KokoroEngine.Configuration(toolsDirectory: kokoroDirectory).model.lastPathComponent
-        let workers = EnginePool.recommendedWorkers
+        let workers = EnginePool.recommendedWorkers(fastModel: model == KokoroEngine.Configuration.fastModel)
         return "\(KokoroEngine.describe(modelFile: model)) · \(workers) worker\(workers == 1 ? "" : "s")"
+    }
+
+    /// Credits for the About Habla panel: version, voice engine, and the models behind the library.
+    public var aboutCredits: String {
+        var seen: [String] = []
+        for m in books {
+            for x in m.narrationModels where !seen.contains(x) { seen.append(x) }
+            if m.narrationModels.isEmpty, m.chapters.contains(where: { $0.audioStatus == .ready }), !seen.contains("Kokoro v1.0") { seen.append("Kokoro v1.0") }
+        }
+        return Imprint.about(models: seen, engine: engineDescription).dropFirst().joined(separator: "\n")
     }
 
     /// Kokoro workers for narration: two on Macs with enough cores and memory (~40% faster).
     func makeEngine() -> EnginePool {
         let cfg = KokoroEngine.Configuration(toolsDirectory: kokoroDirectory)
-        return EnginePool((0..<EnginePool.recommendedWorkers).map { _ in KokoroEngine(configuration: cfg) })
+        let fast = cfg.model.lastPathComponent == KokoroEngine.Configuration.fastModel
+        return EnginePool((0..<EnginePool.recommendedWorkers(fastModel: fast)).map { _ in KokoroEngine(configuration: cfg) })
     }
 
     public var kokoroDirectory: URL { support.appendingPathComponent("kokoro", isDirectory: true) }
@@ -232,6 +243,7 @@ public final class StudioStore: ObservableObject {
     private func importInboxLeftovers() {
         let fm = FileManager.default
         let files = ((try? fm.contentsOfDirectory(at: server.inbox, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent != "Failed" }
             .flatMap { (try? fm.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)) ?? [] }
             .filter { $0.pathExtension.lowercased() == "epub" }
         if !files.isEmpty { importFiles(files, fromPhone: true) }
@@ -241,6 +253,7 @@ public final class StudioStore: ObservableObject {
         let ip = LocalNetwork.primaryIPv4()
         onWiFi = ip != nil
         if let port = server.port { serverAddress = ip.map { "\($0):\(port)" } }
+        refreshPairing()   // an open pairing QR code gets the address too
     }
 
     public func reload() {
@@ -290,6 +303,7 @@ public final class StudioStore: ObservableObject {
             let known = await MainActor.run { Set(self.books.map(\.id)) }
             var added: [BookManifest] = [], duplicates: [String] = [], failures: [String] = []
             for url in epubs {
+                var imported = true
                 do {
                     let id = try DocumentDigest.sha256Prefix(of: url)
                     let manifestPath = BookBundle.url(for: id, in: lib).appendingPathComponent(BookBundle.manifestFile).path
@@ -299,10 +313,18 @@ public final class StudioStore: ObservableObject {
                         added.append(try BookImporter().importEPUB(at: url, into: lib).manifest())
                     }
                 } catch {
+                    imported = false
                     failures.append("\(url.deletingPathExtension().lastPathComponent): \(StudioStore.describe(error))")
                 }
                 if url.standardizedFileURL.path.hasPrefix(inbox + "/") {
-                    try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                    let folder = url.deletingLastPathComponent()
+                    if !imported {
+                        // Keep what the iPhone sent: never lose the only copy of a book.
+                        let failed = URL(fileURLWithPath: inbox).appendingPathComponent("Failed", isDirectory: true)
+                        try? FileManager.default.createDirectory(at: failed, withIntermediateDirectories: true)
+                        try? FileManager.default.moveItem(at: url, to: failed.appendingPathComponent("\(Date().timeIntervalSince1970)-\(url.lastPathComponent)"))
+                    }
+                    try? FileManager.default.removeItem(at: folder)
                 }
                 let name = url.lastPathComponent
                 await MainActor.run { self.importing.removeAll { $0 == name } }
@@ -316,7 +338,7 @@ public final class StudioStore: ObservableObject {
                 var lines: [String] = []
                 if !duplicates.isEmpty && !fromPhone { lines.append("Already in your library: \(duplicates.joined(separator: ", ")).") }
                 if !failures.isEmpty { lines.append("Couldn't add:\n" + failures.joined(separator: "\n")) }
-                if rejected > 0 { lines.append("\(rejected) file\(rejected == 1 ? " wasn't" : "s weren't") EPUB and \(rejected == 1 ? "was" : "were") ignored.") }
+                if rejected > 0 { lines.append("\(rejected) file\(rejected == 1 ? " wasn't an EPUB and was" : "s weren't EPUBs and were") ignored.") }
                 if !lines.isEmpty {
                     if !added.isEmpty { lines.insert("Added \(added.count) book\(added.count == 1 ? "" : "s").", at: 0) }
                     self.alert = lines.joined(separator: "\n\n")
@@ -372,16 +394,17 @@ public final class StudioStore: ObservableObject {
         if render?.bookID == m.id {
             // Restart with the new voice (finished sentences of the old voice stay cached).
             renderTask?.cancel()
-            Task { await renderTask?.value; self.narrate(m.id) }
+            Task { await renderTask?.value; self.narrate(m.id, unpause: false) }
         } else if m.voice?.voiceID != v {
-            narrate(m.id)
+            narrate(m.id, unpause: false)   // a setting change never resumes paused narration
         }
     }
 
-    public func narrate(_ id: String) {
+    /// Queues a book. `unpause`: the user asked for narration now (the default).
+    public func narrate(_ id: String, unpause: Bool = true) {
         var s = stopped; s.remove(id); stopped = s
         if !queue.contains(id) { queue.append(id) }
-        paused = false
+        if unpause { paused = false }
         pump()
     }
 
@@ -390,7 +413,15 @@ public final class StudioStore: ObservableObject {
         renderTask?.cancel()
     }
 
-    public func resumeNarration() { paused = false; pump() }
+    /// Resumes narration, starting with `id` when given (the book whose Resume was pressed).
+    public func resumeNarration(_ id: String? = nil) {
+        if let id, queue.contains(id), render?.bookID != id {
+            queue.removeAll { $0 == id }
+            queue.insert(id, at: 0)
+        }
+        paused = false
+        pump()
+    }
 
     public func cancelNarration(_ id: String) {
         var s = stopped; s.insert(id); stopped = s
@@ -457,7 +488,7 @@ public final class StudioStore: ObservableObject {
                     }
                 }
                 if pipeline.skippedSentences > 0 {
-                    failure = "“\(m.title)” is narrated, but \(pipeline.skippedSentences) sentence\(pipeline.skippedSentences == 1 ? "" : "s") couldn't be voiced and \(pipeline.skippedSentences == 1 ? "was" : "were") left as a short silence (details in the voice engine's worker.log)."
+                    failure = "“\(m.title)” is narrated, but \(pipeline.skippedSentences) sentence\(pipeline.skippedSentences == 1 ? "" : "s") couldn't be voiced and \(pipeline.skippedSentences == 1 ? "was" : "were") left as a short silence. Choose Narrate again later to retry them; if it keeps happening, install the voice engine again."
                 }
             } catch is CancellationError {
             } catch {
@@ -532,6 +563,13 @@ public final class StudioStore: ObservableObject {
             if case .installing = kokoro {} else { kokoro = .missing }
             return
         }
+        // A truncated model passes the import check but can't narrate: catch it here.
+        func size(_ u: URL) -> Int { (try? fm.attributesOfItem(atPath: u.path)[.size] as? Int) ?? 0 }
+        let modelOK = cfg.model.lastPathComponent == KokoroEngine.Configuration.fastModel ? size(cfg.model) >= 90_000_000 : size(cfg.model) >= 300_000_000
+        guard modelOK, size(cfg.voicesFile) >= 28_000_000 else {
+            kokoro = .failed("The voice files are incomplete. Install the voice engine again.")
+            return
+        }
         kokoro = .checking
         Task.detached {
             let p = Process()
@@ -566,7 +604,7 @@ public final class StudioStore: ObservableObject {
             let url = URL(string: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/\(KokoroEngine.Configuration.fastModel)")!
             guard let (tmp, resp) = try? await URLSession.shared.download(from: url),
                   (resp as? HTTPURLResponse)?.statusCode == 200,
-                  ((try? fm.attributesOfItem(atPath: tmp.path)[.size] as? Int) ?? 0) > 50_000_000 else { return }
+                  ((try? fm.attributesOfItem(atPath: tmp.path)[.size] as? Int) ?? 0) >= 92_000_000 else { return }
             try? fm.removeItem(at: fast)
             guard (try? fm.moveItem(at: tmp, to: fast)) != nil else { return }
             // New workers pick the fast model; the running ones finish their current book.

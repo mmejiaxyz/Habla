@@ -49,10 +49,18 @@ rm -rf "$UV_CACHE_DIR"
 
 if [[ -z "${HABLA_SKIP_MODELS:-}" ]]; then
   base="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+  # Exact sizes of the published files: a truncated or damaged download is caught here.
+  typeset -A want_size
+  want_size=(kokoro-v1.0.int8.onnx 92361271 voices-v1.0.bin 28214398)
   for f in kokoro-v1.0.int8.onnx voices-v1.0.bin; do
+    if [[ -s "models/$f" && "$(stat -f%z "models/$f")" != "${want_size[$f]}" ]]; then rm -f "models/$f"; fi
     if [[ ! -s "models/$f" ]]; then
       echo "STEP Downloading the voice ($f)…"
-      curl -fsSL --retry 3 -C - -o "models/$f.part" "$base/$f" && mv "models/$f.part" "models/$f"
+      curl -fsSL --retry 3 -C - -o "models/$f.part" "$base/$f"
+      if [[ "$(stat -f%z "models/$f.part")" != "${want_size[$f]}" ]]; then
+        rm -f "models/$f.part"; echo "The voice download was incomplete. Check the internet connection and try again."; exit 1
+      fi
+      mv "models/$f.part" "models/$f"
     fi
   done
 fi

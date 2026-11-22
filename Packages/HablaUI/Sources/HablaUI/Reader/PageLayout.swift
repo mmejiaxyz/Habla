@@ -25,9 +25,11 @@ public final class PageLayout {
     }
 
     private func paginate() {
-        let total = manager.numberOfGlyphs
+        // Stop when every *character* is on a page. (Counting glyphs up front misses the
+        // hyphens TextKit adds during layout, which used to drop the end of long chapters.)
+        let totalChars = storage.length
         var guardCount = 0
-        while guardCount < 5000 {
+        while guardCount < 20000 {
             guardCount += 1
             let c = NSTextContainer(size: pageSize)
             c.lineFragmentPadding = 0
@@ -40,7 +42,8 @@ public final class PageLayout {
                 break
             }
             containers.append(c)
-            if NSMaxRange(gr) >= total { break }
+            let chars = manager.characterRange(forGlyphRange: gr, actualGlyphRange: nil)
+            if NSMaxRange(chars) >= totalChars { break }
         }
     }
 

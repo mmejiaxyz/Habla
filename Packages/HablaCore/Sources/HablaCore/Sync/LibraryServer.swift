@@ -30,7 +30,7 @@ public final class LibraryServer: @unchecked Sendable {
     public var tlsIdentity: SecIdentity?
     public var tlsFingerprint: String?
     /// KOReader / OPDS routes for e-readers (plain HTTP devices). Off unless the Xteink feature is on.
-    public var allowEReaders = true
+    public var allowEReaders = false
     /// A paired device made a request.
     public var onDevice: (@Sendable (PairedDevice) -> Void)?
     /// Largest EPUB accepted from the iPhone.
@@ -169,6 +169,8 @@ public final class LibraryServer: @unchecked Sendable {
         guard digest.lowercased() == (r.headers["x-habla-sha256"] ?? "").lowercased(), digest.hasPrefix(id) else {
             return .text(422, "Checksum mismatch")
         }
+        // An EPUB is a ZIP: refuse anything else now, so the iPhone keeps its copy and can say why.
+        guard r.body.starts(with: [0x50, 0x4B, 0x03, 0x04]) else { return .text(415, "Not an EPUB") }
         var name = (r.headers["x-habla-filename"]?.removingPercentEncoding ?? "\(id).epub")
             .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
         if name.hasPrefix(".") || name.isEmpty { name = "\(id).epub" }

@@ -29,7 +29,15 @@ public enum ReaderTheme: String, CaseIterable, Hashable, Sendable, Codable {
         }
     }
 
-    public var secondary: Color { text.opacity(0.45) }
+    /// Page numbers, footers: as light as each theme allows while staying ≥4.5:1.
+    public var secondary: Color {
+        switch self {
+        case .original: return text.opacity(0.66)
+        case .bold, .paper: return text.opacity(0.7)
+        case .quiet, .calm: return text.opacity(0.76)
+        case .focus: return text.opacity(0.62)
+        }
+    }
     public var control: Color { isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.06) }
     public var isDark: Bool { self == .quiet || self == .focus }
     public var highlight: Color { Theme.accent.opacity(isDark ? 0.40 : 0.48) }
