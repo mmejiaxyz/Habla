@@ -987,6 +987,7 @@ public struct PhoneMacView: View {
     @State private var confirmLeave = false
     @State private var showQR = false
     @State private var copiedCode = false
+    @State private var scanning = false
 
     public init(store: PhoneStore, close: @escaping () -> Void) { self.store = store; self.close = close }
 
@@ -1003,6 +1004,12 @@ public struct PhoneMacView: View {
 
                 if let e = store.error {
                     Text(e).font(Theme.grotesk(13)).foregroundStyle(Theme.accentText)
+                        .fixedSize(horizontal: false, vertical: true).padding(.horizontal, Theme.margin).padding(.top, 12)
+                } else if let j = store.joining {
+                    Text("Adding \(j) to your account…").font(Theme.grotesk(13)).foregroundStyle(Theme.textDim)
+                        .padding(.horizontal, Theme.margin).padding(.top, 12)
+                } else if let n = store.notice {
+                    Text(n).font(Theme.grotesk(13)).foregroundStyle(Theme.text)
                         .fixedSize(horizontal: false, vertical: true).padding(.horizontal, Theme.margin).padding(.top, 12)
                 }
 
@@ -1043,6 +1050,12 @@ public struct PhoneMacView: View {
         .confirmationDialog("Leave “\(store.accountName ?? "this account")”?", isPresented: $confirmLeave, titleVisibility: .visible) {
             Button("Leave", role: .destructive) { store.leaveAccount() }
         } message: { Text("Downloaded books stay on this iPhone, but nothing syncs until you scan the account’s QR code again.") }
+        #if os(iOS)
+        .fullScreenCover(isPresented: $scanning) {
+            QRScanner { url in scanning = false; store.handleLink(url) } cancel: { scanning = false }
+                .ignoresSafeArea()
+        }
+        #endif
         .sheet(isPresented: $showQR, onDismiss: { copiedCode = false }) {
             VStack(spacing: 18) {
                 Text(store.accountName ?? "Your account").font(Theme.display(30)).foregroundStyle(Theme.text)
@@ -1099,6 +1112,10 @@ public struct PhoneMacView: View {
                 ActionPill("Show QR code", symbol: "qrcode", style: .outline, height: 46) { showQR = true }
             }
             .padding(.top, 10)
+            ActionPill("Scan a Mac’s QR code", symbol: "qrcode.viewfinder", style: .outline, height: 46) { store.notice = nil; scanning = true }
+                .padding(.top, 4)
+            Text("A new Mac shows a QR code: scan it to add that Mac to your account.")
+                .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1108,8 +1125,11 @@ public struct PhoneMacView: View {
     var joinCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Join your account").font(Theme.display(32)).foregroundStyle(Theme.text)
-            Text("In Habla on your Mac, open Account. Scan its QR code with the Camera and tap the Habla link. Or copy its code and paste it here.")
+            Text("In Habla on your Mac, open Account and scan its QR code.")
                 .font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
+            ActionPill("Scan QR code", symbol: "qrcode.viewfinder", style: .ink, height: 50) { scanning = true }
+                .padding(.top, 18)
+            CapsLabel("Or paste the account code").padding(.top, 22)
             HStack(spacing: 10) {
                 TextField("habla://account…", text: $code)
                     .textFieldStyle(.plain).font(Theme.grotesk(15))
@@ -1122,7 +1142,7 @@ public struct PhoneMacView: View {
                     .onSubmit { if store.joinAccount(code) { code = "" } }
                 CapsuleButton("Join", height: 46) { if store.joinAccount(code) { code = "" } }
                     .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
-            }.padding(.top, 18)
+            }.padding(.top, 10)
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1158,3 +1178,58 @@ public struct AccountQR: View {
         return CIContext().createCGImage(out, from: out.extent)
     }
 }
+
+#if os(iOS)
+import VisionKit
+
+/// The in-app QR scanner (VisionKit): returns the first habla:// link it sees.
+struct QRScanner: View {
+    var found: (URL) -> Void
+    var cancel: () -> Void
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            if DataScannerViewController.isSupported {
+                ScannerView(found: found)
+            } else {
+                Color.black.overlay(Text("This iPhone can’t scan here. Use the Camera app.").foregroundStyle(.white).padding())
+            }
+            Button(action: cancel) {
+                Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 44, height: 44).background(Circle().fill(.black.opacity(0.5)))
+            }
+            .accessibilityLabel("Close")
+            .padding(.top, 60).padding(.trailing, 20)
+        }
+        .background(Color.black)
+    }
+}
+
+private struct ScannerView: UIViewControllerRepresentable {
+    var found: (URL) -> Void
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let vc = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])], qualityLevel: .balanced,
+                                           isHighlightingEnabled: true)
+        vc.delegate = context.coordinator
+        try? vc.startScanning()
+        return vc
+    }
+    func updateUIViewController(_ vc: DataScannerViewController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(found: found) }
+
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        let found: (URL) -> Void
+        var done = false
+        init(found: @escaping (URL) -> Void) { self.found = found }
+        func dataScanner(_ scanner: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
+            for item in items {
+                guard !done, case .barcode(let b) = item, let s = b.payloadStringValue,
+                      let url = URL(string: s), url.scheme == "habla" else { continue }
+                done = true
+                scanner.stopScanning()
+                found(url)
+            }
+        }
+    }
+}
+#endif

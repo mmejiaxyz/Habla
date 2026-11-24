@@ -178,6 +178,7 @@ public struct StudioWindowView: View {
             }
         }
         .sheet(isPresented: $showLinkMac) { LinkMacSheet(store: store) { showLinkMac = false } }
+        .onAppear { if !store.bridgeReady && !store.helperOnly { showLinkMac = true } }   // a new Mac: its join QR code first
     }
 
     var xteinkRow: some View {
@@ -535,8 +536,27 @@ struct LinkMacSheet: View {
                     helpSomeone
                     Divider()
                 }
+                if !store.bridgeReady {
+                    HStack(alignment: .top, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Scan this with your iPhone").font(Theme.grotesk(15)).fontWeight(.semibold)
+                            note("Use the Camera, or Habla → Account → Scan QR code. Your iPhone gives this Mac your account over Wi-Fi: same books, places and underlines everywhere.")
+                            note("Both need to be on the same Wi-Fi. The code changes every few minutes and works once.")
+                        }
+                        Group {
+                            if let p = store.pairingCode {
+                                QRCode(text: p.invite.absoluteString)
+                            } else {
+                                ProgressView()
+                            }
+                        }
+                        .frame(width: 170, height: 170).padding(10)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white))
+                    }
+                    Divider()
+                }
                 note(store.bridgeReady ? "Or move this Mac into another account by pasting its code:"
-                                       : "Paste your account’s code (copied on another Mac or iPhone), or an invite code someone sent you to start your own account:")
+                                       : "No iPhone nearby? Paste your account’s code, or an invite code someone sent you to start your own account:")
                 TextField(store.bridgeReady ? "habla://account…" : "habla://account… or habla-invite:…", text: $pasted).textFieldStyle(.roundedBorder)
                 Toggle("Help narrate only", isOn: $store.helperOnly)
                 Text("This Mac narrates books for your devices without showing them, syncing your places or marks, or keeping them afterwards.")
@@ -552,7 +572,9 @@ struct LinkMacSheet: View {
             .padding(22)
         }
         .frame(width: 520).frame(minHeight: 360, idealHeight: store.bridgeReady ? 720 : 360)
-        .onAppear { name = store.accountName ?? "" }
+        .onAppear { name = store.accountName ?? ""; if !store.bridgeReady { store.showJoinCode() } }
+        .onDisappear { store.hideJoinCode() }
+        .onChange(of: store.bridgeReady) { _, ready in if ready { name = store.accountName ?? "" } }
     }
 
     /// Someone with their own Mac and iPhone: invite them, then narrate for them.

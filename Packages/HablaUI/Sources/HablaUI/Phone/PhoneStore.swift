@@ -390,6 +390,53 @@ public final class PhoneStore: ObservableObject {
         return true
     }
 
+    /// A habla:// link from the Camera or the in-app scanner: an account to join, or a Mac
+    /// (without an account) asking for this iPhone's account.
+    public func handleLink(_ url: URL) {
+        switch url.host {
+        case "account": joinAccount(url.absoluteString)
+        case "join":
+            if let invite = PairingInvite(url: url) { Task { await giveAccount(to: invite) } }
+        case "pair": error = "That’s an old pairing code. Update Habla on your Mac."
+        default: error = "That isn’t a Habla code."
+        }
+    }
+
+    @Published public private(set) var joining: String?
+    @Published public var notice: String?
+
+    /// Hands this iPhone's account to the Mac whose join QR code was scanned: over Wi-Fi,
+    /// pinned to the certificate in the QR code, proving the one-time code.
+    public func giveAccount(to invite: PairingInvite) async {
+        guard let link = accountLink else {
+            error = "This iPhone isn’t in an account yet. Scan the QR code on a Mac that has one."
+            return
+        }
+        let macName = invite.name.replacingOccurrences(of: "Habla on ", with: "")
+        joining = macName
+        defer { joining = nil }
+        var url = nearby.first { $0.libraryID == invite.libraryID }?.url
+        for _ in 0..<20 where url == nil {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            url = nearby.first { $0.libraryID == invite.libraryID }?.url
+        }
+        if url == nil, let a = invite.address { url = URL(string: "https://\(a)") }
+        guard let url else { error = "Couldn’t find \(macName). Is this iPhone on the same Wi-Fi?"; return }
+        let session = PinnedTrust(fingerprint: invite.fingerprint).session()
+        do {
+            try await SyncClient(baseURL: url, session: session)
+                .join(code: invite.code, fingerprint: invite.fingerprint, deviceID: deviceID, deviceName: deviceName, account: link)
+            error = nil
+            notice = "\(macName) joined \(accountName ?? "your account")."
+            // The Mac restarts sharing with the account: connect once it's back.
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            await connectNearby()
+            await syncAccount()
+        } catch {
+            self.error = Self.describe(error)
+        }
+    }
+
     /// Leaves the account on this iPhone (downloaded books stay).
     public func leaveAccount() {
         Keychain.delete("account")

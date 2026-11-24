@@ -59,6 +59,8 @@
 	<array>
 		<string>_habla._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Habla scans the QR code on your Mac to add it to your account.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Habla finds Habla on your Mac to download books and sync your place.</string>
 	<key>UIBackgroundModes</key>

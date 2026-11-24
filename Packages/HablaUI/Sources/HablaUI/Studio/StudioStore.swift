@@ -585,6 +585,38 @@ public final class StudioStore: ObservableObject {
 
     public func stopPairing() { pairingWindow.close(); refreshPairing() }
 
+    private var joinTask: Task<Void, Never>?
+
+    /// No account yet: keeps a fresh join QR code on screen (a new one when it expires or is
+    /// used up) until an iPhone hands this Mac its account.
+    public func showJoinCode() {
+        joinTask?.cancel()
+        joinTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.currentBridgeConfig == nil else { break }
+                if self.pairingWindow.current == nil { self.pairingWindow.open() }
+                self.refreshPairing()
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+            self?.pairingWindow.close()
+            self?.refreshPairing()
+        }
+    }
+
+    public func hideJoinCode() { joinTask?.cancel(); joinTask = nil; stopPairing() }
+
+    /// An iPhone scanned the join QR code and handed over its account.
+    func adoptAccount(_ config: BridgeConfig, name: String?) {
+        guard currentBridgeConfig == nil else { return }
+        try? FileManager.default.createDirectory(at: bridgeFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        saveBridgeFile(BridgeFile(url: config.url, libraryKey: config.libraryKey, enrollSecret: nil))
+        if let name { accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName") }
+        try? FileManager.default.removeItem(at: support.appendingPathComponent("bridge-state.json"))
+        hideJoinCode()
+        startBridge()
+        objectWillChange.send()
+    }
+
     public func forget(_ device: PairedDevice) {
         registry.forget(device.id)
         devices = registry.all
@@ -659,6 +691,7 @@ public final class StudioStore: ObservableObject {
             }
         }
         pairingWindow.onChange = { [weak self] in Task { @MainActor in self?.refreshPairing() } }
+        server.onJoin = { [weak self] config, name in Task { @MainActor in self?.adoptAccount(config, name: name) } }
         if !helperOnly { startServer() }                 // a helper doesn't share a library on Wi-Fi
         if Features.xteink { startXteinkWatcher() }
         startLibraryWatcher()

@@ -190,6 +190,24 @@ public struct SyncClient: Sendable {
         catch SyncError.http(404, _) { throw SyncError.pairing("This Mac doesn't support pairing. Update Habla on your Mac.") }
     }
 
+    /// Hands this iPhone's account to a Mac that has none (from its join QR code).
+    public func join(code: String, fingerprint: String, deviceID: String, deviceName: String, account: URL) async throws {
+        let body = JoinRequest(deviceID: deviceID, deviceName: deviceName,
+                               proof: Pairing.proof(code: code, fingerprint: fingerprint, deviceID: deviceID),
+                               account: account.absoluteString)
+        var r = request("v1/join", method: "POST")
+        r.httpBody = try JSON.encoder.encode(body)
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (_, response) = try await perform(r)
+        switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200..<300: return
+        case 403: throw SyncError.pairing("That code expired. Open Account on the Mac again and scan the new code.")
+        case 409: throw SyncError.pairing("That Mac is already in an account.")
+        case 404: throw SyncError.pairing("Update Habla on that Mac first.")
+        default: try check(response, "v1/join")
+        }
+    }
+
     /// Sends an EPUB to the Mac, which imports and narrates it. Returns the book id.
     @discardableResult
     public func sendBook(_ epub: URL, filename: String? = nil) async throws -> String {

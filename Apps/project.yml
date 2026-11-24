@@ -43,6 +43,7 @@ targets:
           - CFBundleURLName: com.habla.pair
             CFBundleURLSchemes: [habla]
         NSLocalNetworkUsageDescription: Habla finds Habla on your Mac to download books and sync your place.
+        NSCameraUsageDescription: Habla scans the QR code on your Mac to add it to your account.
         NSBonjourServices: [_habla._tcp]
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true

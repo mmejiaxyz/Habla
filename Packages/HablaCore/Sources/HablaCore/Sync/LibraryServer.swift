@@ -44,6 +44,8 @@ public final class LibraryServer: @unchecked Sendable {
     /// token, and the hello proves to them that this Mac holds the account key. Set before
     /// `start` (the Bonjour record carries the account tag); restart the server when it changes.
     public let account = Locked<BridgeKeys?>(nil)
+    /// A Mac without an account: an iPhone that scanned its join QR code hands one over.
+    public var onJoin: (@Sendable (BridgeConfig, String?) -> Void)?
     /// Largest EPUB accepted from the iPhone.
     static let maxUpload = 200 * 1024 * 1024
 
@@ -169,6 +171,21 @@ public final class LibraryServer: @unchecked Sendable {
         return .json(PairResponse(token: token, libraryID: libraryID, name: serviceName))
     }
 
+    /// Takes the account an iPhone hands over: only while this Mac has none, only with the
+    /// one-time code from its QR code, bound to this server's certificate.
+    func join(_ r: HTTPRequest) -> HTTPResponse {
+        guard account.value == nil, let pairing, let onJoin else { return .text(409, "This Mac already has an account") }
+        guard let req = try? JSON.decoder.decode(JoinRequest.self, from: r.body),
+              !req.deviceID.isEmpty, req.deviceID.count <= 64 else { return .text(400, "Bad request") }
+        guard pairing.verify(proof: req.proof, fingerprint: tlsFingerprint ?? "", deviceID: req.deviceID) else {
+            return .text(403, "Wrong or expired code")
+        }
+        guard let (config, name) = AccountCode.parse(req.account) else { return .text(400, "Bad account") }
+        onJoin(config, name)
+        onEvent?("JOINED from \(req.deviceName)")
+        return .json(["status": "joined"])
+    }
+
     // MARK: - Books sent from the iPhone
 
     /// `PUT /v1/inbox/<book id>` with the EPUB as body, `X-Habla-SHA256` (full hex digest) and
@@ -219,6 +236,7 @@ public final class LibraryServer: @unchecked Sendable {
             return .json(hello)
         }
         if parts == ["v1", "pair"], r.method == "POST" { return pair(r) }
+        if parts == ["v1", "join"], r.method == "POST" { return join(r) }
 
         let token = r.headers[SyncProtocol.tokenHeader.lowercased()]
         if let keys = account.value, let token, Self.constantTimeEqual(token, keys.lanToken) {
