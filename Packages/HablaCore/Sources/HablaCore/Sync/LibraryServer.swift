@@ -33,6 +33,10 @@ public final class LibraryServer: @unchecked Sendable {
     public var allowEReaders = false
     /// A paired device made a request.
     public var onDevice: (@Sendable (PairedDevice) -> Void)?
+    /// Bookmarks and underlines, exchanged with paired devices.
+    public var markers: MarkerStore?
+    /// The cloud bridge settings handed to paired phones (only over this pinned, paired link).
+    public var bridgeConfig: (@Sendable () -> BridgeConfig?)?
     /// Largest EPUB accepted from the iPhone.
     static let maxUpload = 200 * 1024 * 1024
 
@@ -240,6 +244,18 @@ public final class LibraryServer: @unchecked Sendable {
             // A device clock running ahead must not win forever.
             if p.updatedAt > Date().addingTimeInterval(60) { p.updatedAt = Date() }
             return .json(progress.merge(p))
+
+        case ("GET", "v1", 2) where parts[1] == "markers":
+            return .json(markers?.all ?? [])
+
+        case ("PUT", "v1", 2) where parts[1] == "markers":
+            guard let markers, let incoming = try? JSON.decoder.decode([Marker].self, from: r.body) else { return .text(400, "Bad markers") }
+            markers.merge(incoming)
+            return .json(markers.all)
+
+        case ("GET", "v1", 2) where parts[1] == "bridge":
+            guard registry != nil, let config = bridgeConfig?() else { return .text(404, "No cloud bridge") }
+            return .json(config)
 
         case ("PUT", "v1", 3) where parts[1] == "inbox":
             return receiveInbox(r, id: parts[2])

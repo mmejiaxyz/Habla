@@ -1,76 +1,22 @@
 import Foundation
+import HablaCore
 
-/// An underline in a book, anchored to a sentence (stable across text sizes, themes and
-/// re-layouts): `offset`/`length` are UTF-16 units inside that sentence's text.
-public struct Underline: Codable, Hashable, Identifiable, Sendable {
-    public var id: UUID = UUID()
-    public var chapter: Int
-    public var sentence: Int
-    public var offset: Int
-    public var length: Int
-    public var text: String
-    public var created: Date = Date()
-}
+/// Underlines are markers of kind `.underline` (HablaCore `MarkerStore`, synced to every device).
+public typealias Underline = Marker
 
-/// Underlines for every book, in one small JSON file next to the library.
-public final class AnnotationStore: @unchecked Sendable {
-    public let fileURL: URL
-    private var byBook: [String: [Underline]]
-    private let lock = NSLock()
-
-    public init(fileURL: URL) {
-        self.fileURL = fileURL
-        byBook = (try? JSONDecoder().decode([String: [Underline]].self, from: Data(contentsOf: fileURL))) ?? [:]
-    }
-
-    /// The store that belongs to the library a bundle lives in (`<library>/../annotations.json`).
-    public static func forLibrary(of bundle: URL) -> AnnotationStore {
-        let url = bundle.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("annotations.json")
-        cacheLock.lock(); defer { cacheLock.unlock() }
-        if let s = cache[url] { return s }
-        let s = AnnotationStore(fileURL: url)
-        cache[url] = s
-        return s
-    }
-    nonisolated(unsafe) private static var cache: [URL: AnnotationStore] = [:]
-    private static let cacheLock = NSLock()
-
-    public func underlines(book: String, chapter: Int? = nil) -> [Underline] {
-        lock.withLock { (byBook[book] ?? []).filter { chapter == nil || $0.chapter == chapter } }
-    }
-
-    public func add(_ u: Underline, book: String) {
-        lock.withLock {
-            var list = byBook[book] ?? []
-            // Re-underlining the same span is a no-op.
-            if !list.contains(where: { $0.chapter == u.chapter && $0.sentence == u.sentence && $0.offset == u.offset && $0.length == u.length }) {
-                list.append(u)
-            }
-            byBook[book] = list
-        }
-        save()
-    }
-
-    public func remove(_ id: UUID, book: String) {
-        lock.withLock { byBook[book]?.removeAll { $0.id == id } }
-        save()
-    }
-
-    private func save() {
-        let data = lock.withLock { try? JSONEncoder().encode(byBook) }
-        try? data?.write(to: fileURL, options: .atomic)
-    }
+extension MarkerStore {
+    public func underlines(book: String, chapter: Int? = nil) -> [Marker] { markers(book: book, chapter: chapter, kind: .underline) }
 }
 
 extension ReaderModel {
-    public var annotations: AnnotationStore { AnnotationStore.forLibrary(of: bundle.url) }
+    public var annotations: MarkerStore { MarkerStore.forLibrary(bundle.url.deletingLastPathComponent()) }
 
     /// Character ranges (in the typeset chapter) of this chapter's underlines.
     public func underlineRanges() -> [NSRange] {
         guard let chapterText = layout?.chapter else { return [] }
         return annotations.underlines(book: manifest.id, chapter: chapter).compactMap { u in
             guard let s = chapterText.range(ofSentence: u.sentence) else { return nil }
-            let r = NSRange(location: s.location + u.offset, length: u.length)
+            let r = NSRange(location: s.location + (u.offset ?? 0), length: u.length ?? 0)
             return NSMaxRange(r) <= chapterText.text.length ? r : nil
         }
     }
@@ -80,7 +26,7 @@ extension ReaderModel {
         guard let chapterText = layout?.chapter else { return nil }
         return annotations.underlines(book: manifest.id, chapter: chapter).first { u in
             guard let s = chapterText.range(ofSentence: u.sentence) else { return false }
-            return NSIntersectionRange(NSRange(location: s.location + u.offset, length: u.length), range).length > 0
+            return NSIntersectionRange(NSRange(location: s.location + (u.offset ?? 0), length: u.length ?? 0), range).length > 0
         }
     }
 
@@ -88,13 +34,46 @@ extension ReaderModel {
         guard let chapterText = layout?.chapter, let sid = chapterText.sentence(atCharacter: range.location),
               let s = chapterText.range(ofSentence: sid) else { return }
         let text = (chapterText.text.string as NSString).substring(with: range)
-        annotations.add(Underline(chapter: chapter, sentence: sid, offset: range.location - s.location,
-                                  length: range.length, text: text), book: manifest.id)
+        let offset = range.location - s.location
+        // Re-underlining the same span is a no-op.
+        guard !annotations.underlines(book: manifest.id, chapter: chapter).contains(where: {
+            $0.sentence == sid && $0.offset == offset && $0.length == range.length }) else { return }
+        annotations.add(Marker(bookID: manifest.id, kind: .underline, chapter: chapter, sentence: sid, offset: offset,
+                               length: range.length, text: text, deviceID: annotations.deviceID))
         objectWillChange.send()
     }
 
     public func removeUnderline(_ u: Underline) {
-        annotations.remove(u.id, book: manifest.id)
+        annotations.remove(u.id)
+        objectWillChange.send()
+    }
+
+    // MARK: Bookmarks
+
+    /// Bookmarks on the page(s) showing now.
+    public var pageBookmarks: [Marker] {
+        guard let first = currentSentence else { return [] }
+        let end = (page + columns < pageCount ? layout?.firstSentence(onPage: page + columns) : nil) ?? Int.max
+        return annotations.markers(book: manifest.id, chapter: chapter, kind: .bookmark).filter { $0.sentence >= first && $0.sentence < end }
+    }
+
+    /// Bookmarks this page, or removes its bookmark.
+    public func toggleBookmark() {
+        if !pageBookmarks.isEmpty {
+            for b in pageBookmarks { annotations.remove(b.id) }
+        } else if let sid = currentSentence, let c = layout?.chapter {
+            let text = c.range(ofSentence: sid).map { (c.text.string as NSString).substring(with: $0) } ?? chapterTitle
+            annotations.add(Marker(bookID: manifest.id, kind: .bookmark, chapter: chapter, sentence: sid,
+                                   text: text.trimmingCharacters(in: .whitespacesAndNewlines), deviceID: annotations.deviceID))
+        }
+        objectWillChange.send()
+    }
+
+    /// Every bookmark and underline of the book, in reading order.
+    public var allMarkers: [Marker] { annotations.markers(book: manifest.id) }
+
+    public func removeMarker(_ m: Marker) {
+        annotations.remove(m.id)
         objectWillChange.send()
     }
 

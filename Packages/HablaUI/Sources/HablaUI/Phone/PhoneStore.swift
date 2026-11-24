@@ -31,7 +31,12 @@ public final class PhoneStore: ObservableObject {
 
     public let library: URL
     public let progress: ProgressStore
+    public let markers: MarkerStore
     public let deviceID: String
+    /// When the cloud bridge last synced (away from home), for the status line.
+    @Published public private(set) var bridgeSynced: Date?
+    private var bridgeSync: BridgeSync?
+    private var bridgeRan: Date?
     var remote: [LibraryEntry] = []
     var downloading: [String: Double] = [:]
     /// Books being refreshed in the background (new chapters): they stay fully usable.
@@ -60,6 +65,8 @@ public final class PhoneStore: ObservableObject {
         progress = ProgressStore(fileURL: base.appendingPathComponent("progress.json"))
         if let id = UserDefaults.standard.string(forKey: "habla.deviceID") { deviceID = id }
         else { deviceID = "iphone-" + UUID().uuidString.prefix(8).lowercased(); UserDefaults.standard.set(deviceID, forKey: "habla.deviceID") }
+        markers = MarkerStore.forLibrary(library, deviceID: deviceID)
+        markers.onChange = { [weak self] in Task { @MainActor in self?.markersChanged() } }
         // Positions saved by an earlier version and never sent: send them on the next sync.
         if !UserDefaults.standard.bool(forKey: "habla.pendingMigrated") {
             UserDefaults.standard.set(true, forKey: "habla.pendingMigrated")
@@ -152,10 +159,18 @@ public final class PhoneStore: ObservableObject {
                     self.outbox.append(id)
                 }
                 self.reloadLocal()
-                // Narrate right here when this iPhone has the voice (the Mac still gets the book).
-                for id in addedIDs where self.canNarrateOnPhone(id) { self.narrateOnPhone(id) }
                 if !failedNames.isEmpty { self.error = "Couldn't open \(failedNames.joined(separator: ", ")). Is it a DRM-free EPUB?" }
-                Task { await self.sendOutbox() }
+                Task {
+                    if self.bridge != nil {
+                        // The running device that finishes it first narrates it (often a Mac).
+                        try? await self.bridge?.syncState()
+                        for id in addedIDs { await self.route(id) }
+                    } else {
+                        // No bridge: narrate here when this iPhone has the voice; the Mac still gets the book.
+                        for id in addedIDs where self.canNarrateOnPhone(id) { self.narrateOnPhone(id) }
+                    }
+                    await self.sendOutbox()
+                }
             }
         }
     }
@@ -241,6 +256,10 @@ public final class PhoneStore: ObservableObject {
                 self.phoneQueue.removeFirst()
                 self.phoneNarration[id] = nil
                 self.reloadLocal()
+                if self.manifest(id)?.isFullyRendered == true, let bridge = self.bridge {
+                    await bridge.markNarratedHere(id)            // the Macs get it with its audio
+                    Task { await self.syncBridge(atHome: self.client != nil, force: true) }
+                }
             }
             await engine.shutdown()   // frees the model's memory
             self?.phoneTask = nil
@@ -251,15 +270,22 @@ public final class PhoneStore: ObservableObject {
         let bundle = bundle(id)
         guard let m = manifest(id) else { return }
         let voice = m.voice.flatMap { BookLanguage.voice($0.voiceID, speaks: m.language) ? $0 : nil }
-            ?? VoiceInfo(engine: "paradee", voiceID: BookLanguage.defaultVoice(for: m.language))
+            ?? VoiceInfo(engine: "paradee", voiceID: BookLanguage.closestVoice(to: accountVoice, for: m.language))
         let pending = Set(m.chapters.filter { $0.audioStatus == .pending }.map(\.index))
         #if canImport(UIKit)
         // A little extra time to finish the sentence if Habla goes to the background.
         let background = UIApplication.shared.beginBackgroundTask(withName: "Narrating") {}
         defer { UIApplication.shared.endBackgroundTask(background) }
         #endif
+        let started = Date()
+        let voiced = SentenceCounter()
+        defer {
+            let n = voiced.count, secs = Date().timeIntervalSince(started)
+            if n >= 20, secs > 0 { Self.narrationSpeed = Self.narrationSpeed.map { $0 * 0.7 + Double(n) / secs * 0.3 } ?? Double(n) / secs }
+        }
         do {
             try await pipeline.render(bundle, voice: voice, only: pending) { [weak self] p in
+                if !p.cacheHit { voiced.add() }
                 let done = (Double(p.chaptersDone) + Double(p.sentence) / Double(max(1, p.sentenceCount))) / Double(max(1, p.chaptersTotal))
                 let chapterFinished = p.sentence == p.sentenceCount
                 Task { @MainActor in
@@ -283,6 +309,128 @@ public final class PhoneStore: ObservableObject {
                                         mode: mode, deviceID: deviceID, fraction: fraction))
         if let i = books.firstIndex(where: { $0.id == book }) { books[i].position = progress.position(for: book) }
         schedulePush()
+    }
+
+    // MARK: Cloud bridge (away from home)
+
+    /// The bridge settings the paired Mac handed over (Keychain, this device only).
+    var bridgeConfig: BridgeConfig? {
+        guard let mac = paired, let s = Keychain.get("bridge." + mac.libraryID) else { return nil }
+        return try? JSONDecoder().decode(BridgeConfig.self, from: Data(s.utf8))
+    }
+
+    func storeBridgeConfig(_ config: BridgeConfig?) {
+        guard let mac = paired else { return }
+        guard let config, let d = try? JSONEncoder().encode(config) else { Keychain.delete("bridge." + mac.libraryID); bridgeSync = nil; return }
+        if config != bridgeConfig { Keychain.set(String(decoding: d, as: UTF8.self), for: "bridge." + mac.libraryID); bridgeSync = nil }
+    }
+
+    var bridge: BridgeSync? {
+        if let bridgeSync { return bridgeSync }
+        guard let config = bridgeConfig else { return nil }
+        let b = BridgeSync(config: config, deviceID: deviceID, deviceName: deviceName, role: .phone, progress: progress,
+                           markers: markers, library: library,
+                           stateURL: library.deletingLastPathComponent().appendingPathComponent("bridge-state.json"))
+        bridgeSync = b
+        return b
+    }
+
+    /// Sentences per second this iPhone voices (measured; a guess until then).
+    static var narrationSpeed: Double? {
+        get { UserDefaults.standard.object(forKey: "habla.narrationSpeed") as? Double }
+        set { UserDefaults.standard.set(newValue, forKey: "habla.narrationSpeed") }
+    }
+
+    var narratorStatus: NarratorStatus? {
+        guard Self.onDeviceVoice != nil else { return nil }
+        let queued = phoneQueue.compactMap { manifest($0) }.reduce(0) { sum, m in
+            sum + m.chapters.filter { $0.audioStatus == .pending }.reduce(0) { $0 + $1.sentenceCount }
+        }
+        return NarratorStatus(sentencesPerSecond: Self.narrationSpeed ?? 0.2, queuedSentences: queued, measured: Self.narrationSpeed != nil)
+    }
+
+    /// Sends a new book to whichever running device would finish narrating it first: the paired
+    /// Mac over Wi-Fi, the other Mac through the bridge, or this iPhone when no Mac is running.
+    func route(_ id: String) async {
+        guard let bridge, let m = manifest(id), let mac = paired else { return }
+        guard BookLanguage.hasVoice(m.language) else { return }          // read-only languages: the Mac just needs the text
+        let sentences = m.chapters.filter { $0.audioStatus == .pending }.reduce(0) { $0 + $1.sentenceCount }
+        await bridge.setNarrator(narratorStatus)
+        guard let target = await bridge.chooseNarrator(sentences: sentences) else { return }   // nobody: keep the outbox
+        if target == deviceID {
+            outbox.removeAll { $0 == id }            // narrated here, then sent to the Macs with its audio
+            narrateOnPhone(id)
+        } else if target == "mac-" + mac.libraryID, client != nil {
+            return                                    // the paired Mac, right here on Wi-Fi: the outbox sends it
+        } else {
+            let epub = BookImporter.originalURL(for: id, in: library)
+            guard FileManager.default.fileExists(atPath: epub.path) else { return }
+            if (try? await bridge.sendEPUB(epub, id: id, filename: m.title + ".epub", to: target)) != nil {
+                outbox.removeAll { $0 == id }
+            }
+        }
+    }
+
+    /// Bookmarks and underlines changed: the Mac at home gets them now (Wi-Fi, free); the
+    /// bridge gets them with the place when the book or the app closes.
+    public func markersChanged() {
+        Task { if let client { try? await client.syncMarkers(markers) } }
+    }
+
+    /// A book (reader or player) closed, or Habla went to the background: the place and marks go
+    /// to the bridge now, and only now.
+    public func bookClosed() {
+        guard bridge != nil else { return }
+        #if canImport(UIKit)
+        let task = UIApplication.shared.beginBackgroundTask(withName: "Saving your place") {}
+        #endif
+        Task {
+            await syncBridge(atHome: client != nil, force: true)
+            #if canImport(UIKit)
+            UIApplication.shared.endBackgroundTask(task)
+            #endif
+        }
+    }
+
+    /// Habla opened: what changed elsewhere (places, marks, new books) comes in.
+    func bridgeOnOpen() {
+        guard bridge != nil else { return }
+        Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)     // let the Mac at home be found first
+            await syncBridge(atHome: client != nil, force: true)
+        }
+    }
+
+    /// The account's voice (same on every device; set on the Mac).
+    var accountVoice: String { UserDefaults.standard.string(forKey: "habla.voice") ?? "af_heart" }
+
+    /// Away from the Mac: places, markers, new books and EPUBs go through the bridge.
+    /// At home only places and markers are mirrored (books come over Wi-Fi, faster).
+    func syncBridge(atHome: Bool, force: Bool = false) async {
+        guard let bridge else { return }
+        if !force, let last = bridgeRan, Date().timeIntervalSince(last) < 300 { return }
+        bridgeRan = Date()
+        do {
+            await bridge.setNarrator(narratorStatus)
+            try await bridge.syncState()
+            UserDefaults.standard.set(await bridge.settings.voice, forKey: "habla.voice")
+            let arrived = await bridge.booksOnMac()
+            for id in outbox where arrived.contains(id) {
+                outbox.removeAll { $0 == id }; sentAt[id] = nil
+                try? FileManager.default.removeItem(at: BookImporter.originalURL(for: id, in: library))
+            }
+            // Away from the paired Mac, books waiting for it go to the best running device instead.
+            if !atHome { for id in outbox { await route(id) } }
+            // Books narrated elsewhere (either Mac, or this iPhone's earlier work) arrive with audio.
+            if !(try await bridge.receiveBooks()).isEmpty { reloadLocal() }
+            for id in try await bridge.retarget() where canNarrateOnPhone(id) { narrateOnPhone(id) }
+            try await bridge.publishNewBooks()
+            try await bridge.collect()
+            bridgeSynced = Date()
+        } catch {
+            // Offline or a free-tier cap: places stay saved here and go out next time.
+        }
+        reloadLocal()
     }
 
     private func schedulePush() {
@@ -364,6 +512,7 @@ public final class PhoneStore: ObservableObject {
         }
         browser.start()
         Task { await sync() }
+        bridgeOnOpen()
         checkForAppUpdate()
     }
 
@@ -381,7 +530,8 @@ public final class PhoneStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 guard let self, !Task.isCancelled else { return }
                 ticks += 1
-                guard !self.syncing, let client = self.client else { continue }
+                guard !self.syncing else { continue }
+                guard let client = self.client else { continue }
                 if let fresh = try? await client.library() {
                     let changed = fresh.map { "\($0.id):\($0.revision)" } != self.remote.map { "\($0.id):\($0.revision)" }
                     if changed || ticks % 8 == 0 { await self.sync() }
@@ -459,7 +609,8 @@ public final class PhoneStore: ObservableObject {
 
     /// Forgets the paired Mac on this iPhone (downloaded books stay).
     public func unpair() {
-        if let mac = paired { Keychain.delete(mac.libraryID) }
+        if let mac = paired { Keychain.delete(mac.libraryID); Keychain.delete("bridge." + mac.libraryID) }
+        bridgeSync = nil
         paired = nil
         savePaired()
         remote = []
@@ -519,6 +670,8 @@ public final class PhoneStore: ObservableObject {
             let started = Date()
             try await client.syncProgress(progress, since: lastPush)
             lastPush = started; UserDefaults.standard.set(started, forKey: "habla.lastPush")
+            try? await client.syncMarkers(markers)
+            if let config = try? await client.bridgeConfig() { storeBridgeConfig(config) }
             lastSync = Date()
             error = nil
             await sendOutbox()
@@ -607,4 +760,12 @@ extension PhoneStore {
         self.downloading = downloading
         reloadLocal()
     }
+}
+
+/// Counts sentences voiced (from the render callback's thread).
+final class SentenceCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func add() { lock.withLock { n += 1 } }
+    var count: Int { lock.withLock { n } }
 }

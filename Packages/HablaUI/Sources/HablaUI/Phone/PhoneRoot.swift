@@ -47,7 +47,7 @@ public struct PhoneRoot: View {
         }
         .preferredColorScheme(.light)
         #if os(iOS)
-        .fullScreenCover(item: $cover, onDismiss: saveReaderIfNeeded) { c in
+        .fullScreenCover(item: $cover, onDismiss: { saveReaderIfNeeded(); store.bookClosed() }) { c in
             switch c {
             case .player: playerScreen
             case .reader(let model): readerScreen(model)
@@ -97,6 +97,7 @@ public struct PhoneRoot: View {
                 player.flush()
                 saveReaderIfNeeded()
                 Task { await store.sync() }
+                if p == .background { store.bookClosed() }
             @unknown default: break
             }
         }

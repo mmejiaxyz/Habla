@@ -7,6 +7,9 @@ import Foundation
 ///   GET  /v1/books/{id}/files/{path}  → raw file (only paths listed in the manifest)
 ///   GET  /v1/progress                 → [ReadingPosition]
 ///   PUT  /v1/progress                 ← ReadingPosition, → winning ReadingPosition
+///   GET  /v1/markers                  → [Marker] (bookmarks + underlines, tombstones included)
+///   PUT  /v1/markers                  ← [Marker], → merged [Marker]
+///   GET  /v1/bridge                   → BridgeConfig (paired devices only; 404 without a bridge)
 ///
 /// If the server has an access token, requests must send `X-Habla-Token`.
 public enum SyncProtocol {

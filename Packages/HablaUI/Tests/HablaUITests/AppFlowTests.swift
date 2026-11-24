@@ -130,7 +130,7 @@ final class AppFlowTests: XCTestCase {
         model.style = model.style.larger()
         let again = (try XCTUnwrap(model.layout).chapter.text.string as NSString).substring(with: try XCTUnwrap(model.underlineRanges().first))
         XCTAssertEqual(again, text)
-        let disk = AnnotationStore(fileURL: lib.deletingLastPathComponent().appendingPathComponent("annotations.json"))
+        let disk = MarkerStore(fileURL: lib.deletingLastPathComponent().appendingPathComponent("markers.json"), deviceID: "t")
         XCTAssertEqual(disk.underlines(book: m.id).first?.text, text)
         model.removeUnderline(try XCTUnwrap(model.underline(covering: word)))
         // "Sentence" means the whole sentence, not the shorter piece narration uses.

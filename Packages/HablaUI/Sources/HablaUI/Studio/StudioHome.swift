@@ -15,10 +15,11 @@ extension StudioWindowView {
             homeSidebar.frame(width: 240)
             Rectangle().fill(Theme.hairline).frame(width: 0.5)
             VStack(spacing: 0) {
-                if store.voiceEngine != .ready && !store.books.isEmpty { voiceEngineBanner }
+                if store.voiceEngine != .ready && (!store.books.isEmpty || store.helperOnly) { voiceEngineBanner }
                 updateBanner
                 Group {
-                    if store.books.isEmpty && store.importing.isEmpty { emptyHome }
+                    if store.helperOnly { helperHome }
+                    else if store.books.isEmpty && store.importing.isEmpty { emptyHome }
                     else if showingBook, let m = store.selected { bookPage(m) }
                     else { home }
                 }
@@ -43,14 +44,39 @@ extension StudioWindowView {
 
     func open(_ m: BookManifest) { store.selection = m.id; showingBook = true }
 
+    /// Help narrate only: what this Mac is doing for the other devices, without any book.
+    var helperHome: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Helping narrate").font(Theme.display(40)).foregroundStyle(Theme.text)
+            Text("This Mac narrates books for your other devices. It doesn't show them, doesn't sync your places or marks, and deletes each book once your devices have it.")
+                .font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+            Group {
+                if let r = store.render {
+                    let pct = r.bookSentencesTotal > 0 ? Int(100 * Double(r.bookSentencesDone) / Double(r.bookSentencesTotal)) : 0
+                    Text("Narrating a book · \(pct)%" + (r.secondsLeft.map { " · about \(Int(($0 / 60).rounded(.up))) min left" } ?? ""))
+                } else if store.helperJobs > 0 {
+                    Text("Waiting for your devices to collect \(store.helperJobs) book\(store.helperJobs == 1 ? "" : "s")")
+                } else {
+                    Text(store.bridgeReady ? "Idle: ready for the next book" : "Not linked yet: use “Join another Mac’s library…”")
+                }
+            }
+            .font(Theme.grotesk(15)).foregroundStyle(Theme.text)
+            if store.queue.count > 1 { Text("\(store.queue.count - 1) more waiting").font(Theme.grotesk(13)).foregroundStyle(Theme.textDim) }
+            Button("Stop helping") { store.helperOnly = false }.padding(.top, 8)
+        }
+        .padding(48).frame(maxWidth: 620, maxHeight: .infinity, alignment: .topLeading).frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     // MARK: Sidebar
 
     var homeSidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Habla").font(Theme.display(30)).foregroundStyle(Theme.text)
                 .padding(.horizontal, 10).padding(.top, 30).padding(.bottom, 16)
-            navItem("Library", "books.vertical", count: store.books.count, on: !narratingOnly) { narratingOnly = false; showingBook = false }
-            navItem("Narrating", "headphones", count: narratingIDs.count, on: narratingOnly) { narratingOnly = true; showingBook = false }
+            if !store.helperOnly {
+                navItem("Library", "books.vertical", count: store.books.count, on: !narratingOnly) { narratingOnly = false; showingBook = false }
+                navItem("Narrating", "headphones", count: narratingIDs.count, on: narratingOnly) { narratingOnly = true; showingBook = false }
+            }
 
             CapsLabel("Devices").padding(.horizontal, 10).padding(.top, 26).padding(.bottom, 2)
             devices.padding(.horizontal, -14)

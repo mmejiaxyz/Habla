@@ -1,0 +1,42 @@
+# Habla cloud bridge: an encrypted mailbox between the Mac and the iPhone.
+# See Docs/cloud-bridge.md. Secret (set once): wrangler secret put ENROLL_SECRET
+name = "habla-bridge"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "BRIDGE"
+bucket_name = "habla-bridge"
+
+# Only listed (once a day) to measure its size: the free tier is shared by the account.
+[[r2_buckets]]
+binding = "PORTFOLIO"
+bucket_name = "portfolio-media"
+
+# Live connections: each running Mac keeps one (hibernating, so idle costs nothing) and
+# hears "changed" the moment another device updates its document.
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "habla-bridge-ledger"
+database_id = "b5e5efc4-f1bc-4189-9b0d-0a04e58d1616"
+
+[vars]
+STORAGE_CAP_BYTES = "8589934592"   # 8 GiB, Habla + Portfolio together (free: 10 GB)
+CLASS_A_CAP = "400000"             # per month (free: 1 M for the account)
+CLASS_B_CAP = "4000000"            # per month (free: 10 M)
+REQUESTS_CAP_DAY = "20000"         # per day (free: 100 k Worker requests, 100 k D1 writes)
+TRANSIT_TTL_DAYS = "14"
+MAX_STATE_BYTES = "1048576"
+MAX_TRANSIT_BYTES = "16777216"
+
+[triggers]
+crons = ["17 3 * * *"]

@@ -150,6 +150,17 @@ public struct SyncClient: Sendable {
         for remote in try await getJSON([ReadingPosition].self, "v1/progress") { store.adopt(remote) }
     }
 
+    /// Exchanges bookmarks and underlines with the Mac (both sides end up with the merge).
+    public func syncMarkers(_ store: MarkerStore) async throws {
+        store.merge(try await sendJSON([Marker].self, "v1/markers", method: "PUT", body: store.all))
+    }
+
+    /// The Mac's cloud bridge settings (nil when it has none). Only over the paired link.
+    public func bridgeConfig() async throws -> BridgeConfig? {
+        do { return try await getJSON(BridgeConfig.self, "v1/bridge") }
+        catch SyncError.http(404, _) { return nil }
+    }
+
     // MARK: Pairing
 
     /// The Mac's public hello: name and library id (no pairing needed).

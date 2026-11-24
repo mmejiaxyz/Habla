@@ -18,6 +18,7 @@ public struct StudioWindowView: View {
     /// Redesign: sidebar "Narrating" filter.
     @State var narratingOnly = false
     @State private var confirmForget: PairedDevice?
+    @State private var showLinkMac = false
 
     public init(store: StudioStore, updater: StudioUpdater = StudioUpdater(), installScript: URL?, openReader: @escaping (String) -> Void) {
         self.store = store; self.updater = updater; self.installScript = installScript; self.openReader = openReader
@@ -157,8 +158,16 @@ public struct StudioWindowView: View {
                 deviceRow(on: recent, name: d.name, detail: d.lastSeen.map { "Synced \(Format.ago($0))" } ?? "Paired")
                     .contextMenu { Button("Forget “\(d.name)”…", role: .destructive) { confirmForget = d } }
             }
-            Button { store.startPairing() } label: {
-                Text(store.devices.isEmpty ? "Pair iPhone…" : "Pair another device…")
+            if !store.helperOnly {
+                Button { store.startPairing() } label: {
+                    Text(store.devices.isEmpty ? "Pair iPhone…" : "Pair another device…")
+                        .font(Theme.grotesk(13)).foregroundStyle(Theme.accentText)
+                        .padding(.horizontal, 24).padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+            }
+            Button { showLinkMac = true } label: {
+                Text(store.bridgeReady ? "Link another Mac…" : "Join another Mac’s library…")
                     .font(Theme.grotesk(13)).foregroundStyle(Theme.accentText)
                     .padding(.horizontal, 24).padding(.vertical, 8)
                     .contentShape(Rectangle())
@@ -168,6 +177,7 @@ public struct StudioWindowView: View {
                 xteinkRow
             }
         }
+        .sheet(isPresented: $showLinkMac) { LinkMacSheet(store: store) { showLinkMac = false } }
         .sheet(isPresented: Binding(get: { store.pairingCode != nil }, set: { if !$0 { store.stopPairing() } })) {
             if let p = store.pairingCode { PairingSheet(pairing: p, macName: store.serverName, encrypted: store.encrypted) { store.stopPairing() } }
         }
@@ -445,9 +455,11 @@ public struct StudioReaderWindow: View {
     @StateObject private var model: ReaderModel
     @ObservedObject var player: NarrationPlayer
     var dismiss: () -> Void
+    let store: StudioStore
     @Environment(\.dismiss) private var closeWindow
 
     public init(store: StudioStore, bookID: String, player: NarrationPlayer, dismiss: @escaping () -> Void) {
+        self.store = store
         let bundle = BookBundle(url: BookBundle.url(for: bookID, in: store.library))
         let m = (try? bundle.manifest()) ?? .missing(id: bookID)
         let p = store.progress.position(for: bookID)
@@ -470,6 +482,7 @@ public struct StudioReaderWindow: View {
         ReaderView(model: model, player: player, onClose: { dismiss(); closeWindow() }, onStyle: { StudioReaderWindow.saveStyle($0) })
             .frame(minWidth: 900, minHeight: 600)
             .navigationTitle(model.manifest.title)
+            .onDisappear { store.bookClosed() }                 // the place and marks go out now
     }
 
     static func loadStyle() -> ReaderStyle {
@@ -485,6 +498,44 @@ public struct StudioReaderWindow: View {
 }
 
 /// "Pair your iPhone": a QR code for the iPhone camera, and the same code to type.
+/// Links a second Mac to this library's cloud bridge: both then narrate, sync places and
+/// marks, and new books go to whichever running Mac finishes them first.
+struct LinkMacSheet: View {
+    @ObservedObject var store: StudioStore
+    var onDone: () -> Void
+    @State private var pasted = ""
+    @State private var failed = false
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Link another Mac").font(Theme.grotesk(17)).fontWeight(.semibold)
+            if let code = store.bridgeLinkCode {
+                Text("On the other Mac, open Habla, choose “Join another Mac’s library…”, and paste this code. It works like a password: only paste it on your own Macs.")
+                    .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+                Button(copied ? "Copied" : "Copy link code") {
+                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string); copied = true
+                }
+                Divider()
+            }
+            Text("Or join the library of another Mac by pasting its code here:")
+                .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim)
+            TextField("habla-link:…", text: $pasted).textFieldStyle(.roundedBorder)
+            Toggle("Help narrate only", isOn: $store.helperOnly)
+            Text("This Mac narrates books for your devices without showing them, syncing your places or marks, or keeping them afterwards.")
+                .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+            if failed { Text("That isn't a Habla link code.").font(Theme.grotesk(12)).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("Close", action: onDone)
+                Button("Join") { if store.joinBridge(code: pasted) { onDone() } else { failed = true } }
+                    .keyboardShortcut(.defaultAction).disabled(pasted.isEmpty)
+            }
+        }
+        .padding(22).frame(width: 440)
+    }
+}
+
 public struct PairingSheet: View {
     let pairing: StudioStore.PairingCode
     let macName: String

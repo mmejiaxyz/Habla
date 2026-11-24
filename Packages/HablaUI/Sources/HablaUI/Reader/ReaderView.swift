@@ -38,6 +38,7 @@ public struct ReaderView: View {
     @State private var chrome: Bool
     @State private var showThemes = false
     @State private var showContents = false
+    @State private var contentsMarks = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize   // read in body: re-render on change
     @State private var showFind = false
@@ -103,6 +104,10 @@ public struct ReaderView: View {
                 pages(in: geo.size)
             }
             .padding(insets)
+            if !chrome && !isSpread && !model.pageBookmarks.isEmpty {
+                VStack { HStack { Spacer(); Image(systemName: "bookmark.fill").font(.system(size: 13)).foregroundStyle(Theme.accentText) }; Spacer() }
+                    .padding(.trailing, 20).allowsHitTesting(false).accessibilityHidden(true)
+            }
             if chrome || isSpread { controls }
             if !chrome && !isSpread && narratingHere && player.isPlaying { quietPauseButton }
             if let toast { toastView(toast) }
@@ -486,6 +491,8 @@ public struct ReaderView: View {
                 if narratingHere && !isSpread {
                     roundButton("♪", label: "Open the player (speed, sleep timer)") { onOpenPlayer() }
                 }
+                symbolButton(model.pageBookmarks.isEmpty ? "bookmark" : "bookmark.fill",
+                             label: model.pageBookmarks.isEmpty ? "Bookmark this page" : "Remove bookmark") { model.toggleBookmark() }
                 symbolButton("magnifyingglass", label: "Find in book") { showFind = true }
                 roundButton("☰", label: "Contents") { showContents = true }
                 if isSpread {
@@ -772,6 +779,59 @@ public struct ReaderView: View {
 
     var contentsSheet: some View {
         NavigationStack {
+            VStack(spacing: 0) {
+                Picker("", selection: $contentsMarks) {
+                    Text("Chapters").tag(false)
+                    Text("Marks").tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden().padding(.horizontal, 16).padding(.vertical, 8)
+                if contentsMarks { marksList } else { chaptersList }
+            }
+            .navigationTitle("Contents")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showContents = false } } }
+        }
+        .frame(minWidth: isSpread ? 420 : nil, minHeight: isSpread ? 520 : nil)
+    }
+
+    /// Bookmarks and underlines, in reading order; tap to go there, swipe to remove.
+    @ViewBuilder var marksList: some View {
+        let marks = model.allMarkers
+        if marks.isEmpty {
+            VStack(spacing: 8) {
+                Spacer()
+                Text("No marks yet").font(.ui(15, weight: .semibold))
+                Text("Bookmark a page from the top bar, or underline words with a long press.")
+                    .font(.ui(13)).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(.horizontal, 32)
+                Spacer()
+            }
+        } else {
+            List {
+                ForEach(marks) { m in
+                    Button {
+                        showContents = false
+                        forward = m.chapter > model.chapter || (m.chapter == model.chapter && m.sentence >= (model.currentSentence ?? 0))
+                        model.go(chapter: m.chapter, sentence: m.sentence)
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Image(systemName: m.kind == .bookmark ? "bookmark.fill" : "underline").foregroundStyle(Theme.accentText)
+                                .accessibilityLabel(m.kind == .bookmark ? "Bookmark" : "Underline")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(m.text).lineLimit(2).foregroundStyle(Color.primary)
+                                Text(model.manifest.chapters.first { $0.index == m.chapter }.map(ChapterNaming.title) ?? "")
+                                    .font(.ui(12)).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .onDelete { idx in for i in idx { model.removeMarker(marks[i]) } }
+            }
+        }
+    }
+
+    var chaptersList: some View {
             List(model.manifest.chapters, id: \.index) { c in
                 Button {
                     showContents = false
@@ -782,16 +842,9 @@ public struct ReaderView: View {
                         Text(ChapterNaming.title(c)).foregroundStyle(c.isFrontMatter ? Color.secondary : Color.primary)
                             .fontWeight(c.index == model.chapter ? .semibold : .regular)
                         Spacer()
-                        if c.index == model.chapter { Image(systemName: "bookmark.fill").foregroundStyle(Theme.accentText) }
+                        if c.index == model.chapter { Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(Theme.accentText) }
                     }
                 }
             }
-            .navigationTitle("Contents")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showContents = false } } }
-        }
-        .frame(minWidth: isSpread ? 420 : nil, minHeight: isSpread ? 520 : nil)
     }
 }

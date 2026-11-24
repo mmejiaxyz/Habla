@@ -130,6 +130,7 @@ public final class StudioUpdater: ObservableObject {
             NSWorkspace.shared.open(AppUpdate.releasesPage)
             return
         }
+        AppQuit.allowed = true                 // an update really quits, even when working in the background
         NSApp.terminate(nil)
     }
 
@@ -210,3 +211,9 @@ public final class StudioUpdater: ObservableObject {
     }
 }
 #endif
+
+/// Quitting for real (Quit Habla Completely, an update, log out or shut down). Otherwise, with
+/// "Keep working in the background" on, ⌘Q only hides Habla.
+@MainActor public enum AppQuit {
+    public static var allowed = false
+}
