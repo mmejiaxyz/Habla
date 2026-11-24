@@ -79,7 +79,15 @@ struct StudioApp: App {
 
     @NSApplicationDelegateAdaptor(StudioAppDelegate.self) private var delegate
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
-    @AppStorage("habla.background") private var background = true
+    /// Saved in "habla.background". Plain @State on purpose: MenuBarExtra(isInserted:) bound to
+    /// @AppStorage makes SwiftUI rebuild the menus forever (100% CPU, a frozen window) on macOS 27.
+    @State private var showsMenuIcon = StudioAppDelegate.background
+    private var background: Binding<Bool> {
+        Binding(get: { showsMenuIcon }, set: { on in
+            UserDefaults.standard.set(on, forKey: "habla.background")
+            showsMenuIcon = on
+        })
+    }
     @MainActor static let store = StudioStore()
     @MainActor static let updater = StudioUpdater()
     @ObservedObject private var store = StudioApp.store
@@ -119,7 +127,7 @@ struct StudioApp: App {
             }
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { Task { await updater.check(userInitiated: true) } }
-                Toggle("Keep Working in the Background", isOn: $background)
+                Toggle("Keep Working in the Background", isOn: background)
                 Toggle("Open at Login", isOn: Binding(get: { openAtLogin }, set: { on in
                     UserDefaults.standard.set(on, forKey: "habla.openAtLogin")
                     if on { try? SMAppService.mainApp.register() } else { try? SMAppService.mainApp.unregister() }
@@ -129,11 +137,11 @@ struct StudioApp: App {
         }
 
         // While working in the background: what Habla is doing, without a window.
-        MenuBarExtra(isInserted: $background) {
+        MenuBarExtra(isInserted: $showsMenuIcon) {
             Text(backgroundStatus)
             Divider()
             Button("Open Habla") { StudioAppDelegate.comeForward(); openWindow(id: "main") }
-            Toggle("Keep Working in the Background", isOn: $background)
+            Toggle("Keep Working in the Background", isOn: background)
             Divider()
             Button("Quit Habla Completely") { AppQuit.allowed = true; NSApp.terminate(nil) }
         } label: {

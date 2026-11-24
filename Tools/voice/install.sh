@@ -8,7 +8,9 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 SRC="${0:A:h}"
 DEST="${1:?target dir}"
-PARADEE="git+https://github.com/sahilmahendrakar/paradee@2de547e45da92840a636c499eb0782e988be1e47"
+# GitHub's archive of the pinned commit, not git+https: that runs `git`, which on a Mac without
+# the Xcode command line tools pops up "install the developer tools".
+PARADEE="paradee @ https://github.com/sahilmahendrakar/paradee/archive/2de547e45da92840a636c499eb0782e988be1e47.tar.gz"
 # spaCy's English model, which Paradee's English pronunciation uses (installed now, never at run time).
 SPACY_EN="https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 mkdir -p "$DEST/bin"
