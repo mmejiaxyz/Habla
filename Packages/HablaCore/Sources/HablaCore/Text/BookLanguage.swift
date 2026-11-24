@@ -1,7 +1,8 @@
 import Foundation
 import NaturalLanguage
 
-/// The languages Habla reads, and which of them Paradee can narrate.
+/// The languages Habla reads, and which of them can be narrated (Kokoro on the Mac, Paradee on
+/// the iPhone: the same languages, more voices on the Mac).
 ///
 /// Reading works for all of them (text, layout, hyphenation, Find, dictionary, translate).
 /// Narration needs a Paradee voice: English and Spanish have one. Other languages (German,
@@ -37,30 +38,39 @@ public enum BookLanguage {
         return declaredCode ?? "en"
     }
 
-    /// Paradee has a voice for this language.
+    /// The voice models. Kokoro narrates on the Mac; Paradee (distilled from Kokoro, fewer
+    /// voices) is the iPhone's backup.
+    public enum Narrator: Sendable { case kokoro, paradee }
+
+    /// There is a voice for this language.
     public static func hasVoice(_ lang: String) -> Bool { ["en", "es"].contains(normalize(lang) ?? lang) }
 
     /// Voices offered for a book in this language (first is the default). Languages without a voice
     /// fall back to the English voices, so old voice ids still map somewhere — everything that starts
     /// narration or offers a voice picker must check `hasVoice` first.
-    public static func voices(for lang: String) -> [String] {
-        switch normalize(lang) {
-        case "es": return ["em_alex"]
-        default: return ["af_heart", "am_puck", "bf_isabella", "bm_fable"]
+    public static func voices(for lang: String, narrator: Narrator = .paradee) -> [String] {
+        switch (normalize(lang), narrator) {
+        case ("es", .paradee): return ["em_alex"]
+        case ("es", .kokoro): return ["ef_dora", "em_alex", "em_santa"]
+        case (_, .paradee): return ["af_heart", "am_puck", "bf_isabella", "bm_fable"]
+        case (_, .kokoro): return ["af_heart", "af_bella", "af_nicole", "af_sarah", "am_michael", "am_fenrir", "am_puck",
+                                   "bf_emma", "bf_isabella", "bm_george", "bm_fable"]
         }
     }
 
-    public static func defaultVoice(for lang: String) -> String { voices(for: lang)[0] }
+    public static func defaultVoice(for lang: String, narrator: Narrator = .paradee) -> String { voices(for: lang, narrator: narrator)[0] }
 
     /// Does this voice speak this language? (Voice ids start with a language letter.)
-    public static func voice(_ id: String, speaks lang: String) -> Bool { voices(for: lang).contains(id) }
+    public static func voice(_ id: String, speaks lang: String, narrator: Narrator = .paradee) -> Bool {
+        voices(for: lang, narrator: narrator).contains(id)
+    }
 
     /// The closest available voice to one chosen earlier (e.g. a Kokoro voice Paradee doesn't have):
     /// same accent and gender when possible, else the language's default.
-    public static func closestVoice(to id: String, for lang: String) -> String {
-        let available = voices(for: lang)
+    public static func closestVoice(to id: String, for lang: String, narrator: Narrator = .paradee) -> String {
+        let available = voices(for: lang, narrator: narrator)
         if available.contains(id) { return id }
-        return available.first { $0.prefix(2) == id.prefix(2) } ?? defaultVoice(for: lang)
+        return available.first { $0.prefix(2) == id.prefix(2) } ?? defaultVoice(for: lang, narrator: narrator)
     }
 
     /// Word used for numbered chapters in this language.

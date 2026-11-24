@@ -45,12 +45,20 @@ public struct BookManifest: Codable, Equatable, Sendable {
 
     /// Chapters that still need narrating with `voiceID`: pending, narrated with another voice,
     /// or narrated with an older narration plan (a spoken title / chapter break is missing).
-    public func chaptersToNarrate(voiceID: String) -> [ChapterInfo] {
+    /// `model`: re-narrating with this voice model, so chapters another model made are redone too
+    /// (chapters without a recorded model are older Kokoro audio and stay).
+    public func chaptersToNarrate(voiceID: String, model: String? = nil) -> [ChapterInfo] {
         chapters.filter { c in
             c.audioStatus == .pending
                 || (c.audioStatus == .ready && ((c.voiceID ?? voice?.voiceID) != voiceID
-                                                || (c.planVersion ?? 0) < BookManifest.currentPlanVersion))
+                                                || (c.planVersion ?? 0) < BookManifest.currentPlanVersion
+                                                || c.madeBy(otherThan: model)))
         }
+    }
+
+    /// Chapters with audio from a model other than `model` (e.g. Paradee, once Kokoro is back).
+    public func narrated(byOtherThan model: String) -> Bool {
+        chapters.contains { $0.audioStatus == .ready && $0.madeBy(otherThan: model) }
     }
 }
 
@@ -85,6 +93,12 @@ public struct ChapterInfo: Codable, Equatable, Sendable {
     public var model: String? = nil
     /// The narration plan that made this chapter's audio (nil in older bundles → re-narrate).
     public var planVersion: Int? = nil
+
+    /// Audio another voice model made (nil `model` on either side: no claim, keep it).
+    func madeBy(otherThan model: String?) -> Bool {
+        guard let model, let mine = self.model else { return false }
+        return mine != model
+    }
 }
 
 public struct FileEntry: Codable, Equatable, Hashable, Sendable {

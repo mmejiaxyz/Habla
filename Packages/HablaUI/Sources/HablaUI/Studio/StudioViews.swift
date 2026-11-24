@@ -264,7 +264,7 @@ public struct StudioWindowView: View {
                     Text("Checking the voice engine…").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
                 default:
                     Text("Install the voice engine to narrate books").font(Theme.grotesk(15)).foregroundStyle(Theme.ink)
-                    Text("Paradee runs on this Mac, free and offline. One download of about 250 MB — nothing else to install.")
+                    Text("Kokoro runs on this Mac, free and offline. One download of about 340 MB — nothing else to install.")
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.85))
                 }
             }
@@ -387,6 +387,9 @@ public struct StudioWindowView: View {
         } else if !item.isFullyNarrated {
             pill(item.narrated > 0 ? "Continue" : "Narrate") { store.narrate(m.id) }.disabled(store.voiceEngine != .ready)
                 .help(store.voiceEngine == .ready ? "Narrate this book with the selected voice" : "Install the voice engine first (banner above)")
+        } else if store.canRenarrate(m) {
+            pill("Re-narrate with Kokoro", filled: false) { store.renarrate(m.id) }.disabled(store.voiceEngine != .ready)
+                .help("This book was narrated with Paradee. Its audio keeps playing until each chapter is redone.")
         }
     }
 
