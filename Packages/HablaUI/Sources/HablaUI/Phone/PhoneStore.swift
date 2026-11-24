@@ -78,7 +78,8 @@ public final class PhoneStore: ObservableObject {
         markers = MarkerStore.forLibrary(library, deviceID: deviceID)
         migratePairing()
         hasAccount = accountConfig != nil
-        pathMonitor.pathUpdateHandler = { [cheap = onCheapNetwork] p in cheap.value = p.status == .satisfied && !p.isExpensive && !p.isConstrained }
+        // Only mobile data holds uploads back (Low Data Mode or a hotspot flag on Wi-Fi doesn't).
+        pathMonitor.pathUpdateHandler = { [cheap = onCheapNetwork] p in cheap.value = p.status == .satisfied && !p.usesInterfaceType(.cellular) }
         pathMonitor.start(queue: DispatchQueue(label: "habla.path"))
         markers.onChange = { [weak self] in Task { @MainActor in self?.markersChanged() } }
         // Positions saved by an earlier version and never sent: send them on the next sync.
@@ -459,8 +460,12 @@ public final class PhoneStore: ObservableObject {
                            markers: markers, library: library,
                            stateURL: library.deletingLastPathComponent().appendingPathComponent("bridge-state.json"))
         bridgeSync = b
+        Task { await b.configure(log: { [weak self] msg in Task { @MainActor in self?.bridgeStatus = msg } }) }
         return b
     }
+
+    /// What the cloud sync is doing, or why it stopped (shown on the Account screen).
+    @Published public private(set) var bridgeStatus: String?
 
     /// Wi-Fi or wired, not mobile data or Low Data Mode: only then does this iPhone upload books.
     private let pathMonitor = NWPathMonitor()
@@ -578,11 +583,14 @@ public final class PhoneStore: ObservableObject {
             // Books narrated elsewhere (either Mac, or this iPhone's earlier work) arrive with audio.
             if !(try await bridge.receiveBooks()).isEmpty { reloadLocal() }
             for id in try await bridge.retarget() where canNarrateOnPhone(id) { narrateOnPhone(id) }
-            try await bridge.publishNewBooks(uploads: onCheapNetwork.value)
+            // On the Mac's Wi-Fi, or any non-mobile network: books this iPhone holds go out.
+            try await bridge.publishNewBooks(uploads: onCheapNetwork.value || client != nil)
             try await bridge.collect()
             bridgeSynced = Date()
+            if bridgeStatus?.hasPrefix("Cloud sync stopped") == true { bridgeStatus = nil }
         } catch {
             // Offline or a free-tier cap: places stay saved here and go out next time.
+            bridgeStatus = "Cloud sync stopped: \(Self.describe(error))"
         }
         reloadLocal()
     }
@@ -846,6 +854,7 @@ public final class PhoneStore: ObservableObject {
 
     static func describe(_ error: Error) -> String {
         if let e = error as? SyncError { return e.description }
+        if let e = error as? BridgeError { return e.description }
         return error.localizedDescription
     }
 }

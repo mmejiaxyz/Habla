@@ -1104,6 +1104,10 @@ public struct PhoneMacView: View {
             Text(store.accountName ?? "Your account").font(Theme.display(32)).foregroundStyle(Theme.text)
                 .lineLimit(2).minimumScaleFactor(0.7)
             Label("Encrypted on every device", systemImage: "lock.fill").font(Theme.grotesk(12)).foregroundStyle(Theme.textDim)
+            if let status = store.bridgeStatus {
+                Text(status).font(Theme.grotesk(12)).foregroundStyle(Theme.text.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 10) {
                 ActionPill(store.syncing ? "Syncing…" : "Sync now", style: .ink, height: 46) {
                     Task { await store.sync(); await store.syncAccount() }

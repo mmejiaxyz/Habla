@@ -445,7 +445,9 @@ public actor BridgeSync {
                                         files: m.files.map { TransferFile(path: $0.path, size: $0.size, sha256: $0.sha256, chunks: Self.chunks($0.size)) },
                                         createdAt: Date())
                 let bundle = BookBundle(url: BookBundle.url(for: m.id, in: self.library))
+                self.log("Sending “\(m.title)” to your other devices…")
                 try await self.upload(transfer) { bundle.fileURL($0.path) }
+                self.log("Sent “\(m.title)”.")
                 for old in self.saved.outbox where old.bookID == m.id { try await self.deleteChunks(old) }
                 self.saved.outbox.removeAll { $0.bookID == m.id }
                 self.saved.outbox.append(transfer)
