@@ -679,7 +679,7 @@ public final class PhoneStore: ObservableObject {
     func connectNearby() async {
         guard let keys = accountKeys, !connecting else { return }
         let mine = nearby.filter { $0.account == keys.accountTag }
-        if case .connected(_, let url) = connection, mine.contains(where: { $0.url == url }) { return }
+        if case .connected(_, let url) = connection, lastSync != nil, mine.contains(where: { $0.url == url }) { return }
         connecting = true
         defer { connecting = false }
         let ordered = mine.sorted { a, _ in a.libraryID == homeMac?.libraryID }
@@ -802,6 +802,9 @@ public final class PhoneStore: ObservableObject {
             Task { await connectNearby() }
         } catch {
             connection = .unreachable(Self.describe(error))
+            // The Mac may have changed (reinstalled: new certificate, new id) or moved: look
+            // again among the account's Macs on this Wi-Fi.
+            Task { await connectNearby() }
         }
         reloadLocal()
     }
