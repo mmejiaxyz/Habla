@@ -29,7 +29,7 @@ public enum Imprint {
         var out = ["Habla \(version) (build \(build))"]
         if let engine { out.append("Voice engine: \(engine)") }
         out.append(models.isEmpty ? "No narrated books yet" : "Books narrated with \(models.joined(separator: " and "))")
-        out.append("Narration made on your Mac with Paradee, free and offline")
+        out.append("Narration made with Kokoro on your Mac (Paradee on iPhone), free and offline")
         return out
     }
 

@@ -49,6 +49,15 @@ public actor EnginePool: TTSEngine {
         if waiters.isEmpty { free.append(i) } else { waiters.removeFirst().resume(returning: i) }
     }
 
+    /// Kokoro workers for this Mac. Each keeps the model loaded (about 0.3 GB with the fast int8
+    /// model) and uses several threads itself, so two saturate an M-series Mac; one on small Macs.
+    public static func kokoroWorkers(memoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+                                     cores: Int = ProcessInfo.processInfo.activeProcessorCount) -> Int {
+        let memoryGB = Double(memoryBytes) / 1_073_741_824
+        guard cores >= 8 else { return 1 }
+        return memoryGB >= 7.5 ? 2 : 1
+    }
+
     /// Paradee workers for this Mac: each uses one CPU thread and about 0.45 GB of memory.
     /// Four saturate an M-series Mac (measured: 4 ≈ 130× real time, 8 ≈ 140×); fewer on small Macs.
     public static func recommendedWorkers(memoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,

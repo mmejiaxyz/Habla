@@ -5,7 +5,7 @@ import AVFoundation
 import CryptoKit
 import HablaCore
 
-/// Habla Studio (Mac): library, narration queue (Paradee), the sync server for the iPhone,
+/// Habla Studio (Mac): library, narration queue (Kokoro), the sync server for the iPhone,
 /// and automatic Xteink setup + delivery. Shares its folders with the `habla` CLI.
 @MainActor
 public final class StudioStore: ObservableObject {
@@ -124,7 +124,7 @@ public final class StudioStore: ObservableObject {
     private var activity: NSObjectProtocol?
     private var recentSentenceTimes: [TimeInterval] = []
 
-    static let defaultVoices = BookLanguage.voices(for: "en")
+    static let defaultVoices = BookLanguage.voices(for: "en", narrator: .kokoro)
 
     /// Books the user stopped (cancelled) — not auto-resumed on launch.
     private var stopped: Set<String> {
@@ -556,10 +556,13 @@ public final class StudioStore: ObservableObject {
 
     public var serverName: String { server.serviceName }
 
-    /// What new narration uses right now, e.g. "Paradee 1.3 · 4 workers".
+    /// The model that narrates on this Mac (stamped on every chapter it makes).
+    static let kokoroModel = KokoroEngine.describe(modelFile: KokoroEngine.Configuration.fastModel)
+
+    /// What new narration uses right now, e.g. "Kokoro v1.0 · fast (int8) · 2 workers".
     public var engineDescription: String {
-        let workers = EnginePool.recommendedWorkers()
-        return "Paradee 1.3 · \(workers) worker\(workers == 1 ? "" : "s")"
+        let workers = EnginePool.kokoroWorkers()
+        return "\(Self.kokoroModel) · \(workers) worker\(workers == 1 ? "" : "s")"
     }
 
     /// Credits for the About Habla panel: version, voice engine, and the models behind the library.
@@ -572,13 +575,13 @@ public final class StudioStore: ObservableObject {
         return Imprint.about(models: seen, engine: engineDescription).dropFirst().joined(separator: "\n")
     }
 
-    /// Paradee workers for narration (one CPU thread each; up to four).
+    /// Kokoro workers for narration (two on most Macs).
     func makeEngine() -> EnginePool {
-        let cfg = VoiceEngine.Configuration(toolsDirectory: voiceDirectory)
-        return EnginePool((0..<EnginePool.recommendedWorkers()).map { _ in VoiceEngine(configuration: cfg) })
+        let cfg = KokoroEngine.Configuration(toolsDirectory: voiceDirectory)
+        return EnginePool((0..<EnginePool.kokoroWorkers()).map { _ in KokoroEngine(configuration: cfg) })
     }
 
-    public var voiceDirectory: URL { support.appendingPathComponent("voice", isDirectory: true) }
+    public var voiceDirectory: URL { support.appendingPathComponent("kokoro", isDirectory: true) }
 
     // MARK: Lifecycle
 
@@ -790,11 +793,11 @@ public final class StudioStore: ObservableObject {
     /// The voice for a book: the one chosen for it, else the default, always in the book's language.
     public func voice(for m: BookManifest) -> String {
         let chosen = UserDefaults.standard.string(forKey: "habla.voice.\(m.id)") ?? m.voice?.voiceID ?? defaultVoice
-        return BookLanguage.closestVoice(to: chosen, for: m.language)   // Kokoro-only voices map to the nearest Paradee one
+        return BookLanguage.closestVoice(to: chosen, for: m.language, narrator: .kokoro)
     }
 
     /// Voices offered for a book (its language's voices).
-    public func voices(for m: BookManifest) -> [String] { BookLanguage.voices(for: m.language) }
+    public func voices(for m: BookManifest) -> [String] { BookLanguage.voices(for: m.language, narrator: .kokoro) }
 
     public func setVoice(_ v: String, for m: BookManifest) {
         UserDefaults.standard.set(v, forKey: "habla.voice.\(m.id)")
@@ -860,10 +863,12 @@ public final class StudioStore: ObservableObject {
         self.engine = engine
         let pipeline = RenderPipeline(engine: engine, cacheDirectory: support.appendingPathComponent("SentenceCache"))
         let bundle = BookBundle(url: BookBundle.url(for: id, in: library))
-        let voice = VoiceInfo(engine: "paradee", voiceID: voice(for: m))
+        let voice = VoiceInfo(engine: "kokoro", voiceID: voice(for: m))
+        let redo = renarrating.contains(id)
+        let model = redo ? Self.kokoroModel : nil
         let narratable = m.chapters.filter { $0.audioStatus != .skipped }
         let total = narratable.reduce(0) { $0 + $1.sentenceCount }
-        let remaining = Set(m.chaptersToNarrate(voiceID: voice.voiceID).map(\.index))
+        let remaining = Set(m.chaptersToNarrate(voiceID: voice.voiceID, model: model).map(\.index))
         var done = narratable.filter { !remaining.contains($0.index) }.reduce(0) { $0 + $1.sentenceCount }
         recentSentenceTimes = []
         var lastTick = Date()
@@ -876,7 +881,7 @@ public final class StudioStore: ObservableObject {
         renderTask = Task {
             var failure: String?
             do {
-                try await pipeline.render(bundle, voice: voice) { p in
+                try await pipeline.render(bundle, voice: voice, replaceOtherModels: redo) { p in
                     Task { @MainActor in
                         done += 1
                         let now = Date()
@@ -895,7 +900,7 @@ public final class StudioStore: ObservableObject {
                         if p.sentence == p.sentenceCount {   // chapter finished → visible to the iPhone now
                             self.reload()
                             if let fresh = self.allBooks.first(where: { $0.id == id }) {
-                                let left = Set(fresh.chaptersToNarrate(voiceID: voice.voiceID).map(\.index))
+                                let left = Set(fresh.chaptersToNarrate(voiceID: voice.voiceID, model: model).map(\.index))
                                 done = narratable.filter { !left.contains($0.index) }.reduce(0) { $0 + $1.sentenceCount }
                             }
                         }
@@ -917,7 +922,8 @@ public final class StudioStore: ObservableObject {
                 self.renderTask = nil
                 self.render = nil
                 self.reload()
-                let finished = self.allBooks.first { $0.id == id }.map { $0.chaptersToNarrate(voiceID: voice.voiceID).isEmpty } ?? true
+                let finished = self.allBooks.first { $0.id == id }.map { $0.chaptersToNarrate(voiceID: voice.voiceID, model: model).isEmpty } ?? true
+                if finished { self.renarrating.remove(id) }
                 if var failure {
                     if self.guestBooks[id] != nil { failure = "A book you're narrating for someone else: " + StudioStore.untitled(failure, m.title) }
                     self.alert = finished ? failure : "Narration stopped: \(failure)"
@@ -942,7 +948,7 @@ public final class StudioStore: ObservableObject {
             defer { Task { @MainActor in self.previewing = nil } }
             do {
                 let text = "It was a bright cold day in April, and the clocks were striking thirteen. She smiled, and turned the page."
-                let audio = try await engine.synthesize(text, voice: VoiceInfo(engine: "paradee", voiceID: voice))
+                let audio = try await engine.synthesize(text, voice: VoiceInfo(engine: "kokoro", voiceID: voice))
                 guard !audio.samples.isEmpty else { return }
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent("habla-preview-\(voice).caf")
                 let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: audio.sampleRate, channels: 1, interleaved: false)!
@@ -963,30 +969,29 @@ public final class StudioStore: ObservableObject {
 
     /// After an app update, use the bundled worker script (the model stays).
     private func refreshWorker() {
-        guard let bundled = Bundle.main.url(forResource: "paradee_worker", withExtension: "py"),
+        guard let bundled = Bundle.main.url(forResource: "kokoro_worker", withExtension: "py"),
               FileManager.default.fileExists(atPath: voiceDirectory.path) else { return }
-        let installed = voiceDirectory.appendingPathComponent("paradee_worker.py")
+        let installed = voiceDirectory.appendingPathComponent("kokoro_worker.py")
         if (try? Data(contentsOf: installed)) != (try? Data(contentsOf: bundled)) {
             try? FileManager.default.removeItem(at: installed)
             try? FileManager.default.copyItem(at: bundled, to: installed)
         }
     }
 
-    // MARK: Voice engine (Paradee)
+    // MARK: Voice engine (Kokoro)
 
-    /// Where Kokoro lived before Habla switched to Paradee (removed once Paradee is ready).
-    var oldKokoroDirectory: URL { support.appendingPathComponent("kokoro", isDirectory: true) }
+    /// Where Paradee lived while it was the Mac's voice (removed once Kokoro is ready).
+    var oldParadeeDirectory: URL { support.appendingPathComponent("voice", isDirectory: true) }
 
-    /// Ready only if the files exist AND Paradee loads offline from this Mac.
+    /// Ready only if the files exist AND Kokoro loads offline from this Mac.
     public func checkVoiceEngine() {
-        let cfg = VoiceEngine.Configuration(toolsDirectory: voiceDirectory)
+        let cfg = KokoroEngine.Configuration(toolsDirectory: voiceDirectory)
         let fm = FileManager.default
-        let model = cfg.home.appendingPathComponent("hub/models--sahilmahendrakar--Paradee-8M-v1.3", isDirectory: true)
-        guard [cfg.python, cfg.worker, model].allSatisfy({ fm.fileExists(atPath: $0.path) }) else {
+        guard [cfg.python, cfg.worker, cfg.model, cfg.voicesFile].allSatisfy({ fm.fileExists(atPath: $0.path) }) else {
             if case .installing = voiceEngine { return }
             voiceEngine = .missing
-            // This Mac had the earlier voice engine: install the new one without asking again.
-            if fm.fileExists(atPath: oldKokoroDirectory.path), let script = Bundle.main.url(forResource: "install", withExtension: "sh") {
+            // This Mac had Paradee: install Kokoro without asking again.
+            if fm.fileExists(atPath: oldParadeeDirectory.path), let script = Bundle.main.url(forResource: "install", withExtension: "sh") {
                 installVoiceEngine(script: script)
             }
             return
@@ -995,23 +1000,47 @@ public final class StudioStore: ObservableObject {
         Task.detached {
             let p = Process()
             p.executableURL = cfg.python
-            p.arguments = ["-I", "-c", "import paradee, en_core_web_sm, numpy; paradee.Paradee(threads=1)"]
-            p.environment = ["HF_HOME": cfg.home.path, "HF_HUB_OFFLINE": "1", "HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
+            p.arguments = ["-I", "-c", "import sys, kokoro_onnx, numpy; kokoro_onnx.Kokoro(sys.argv[1], sys.argv[2])",
+                           cfg.model.path, cfg.voicesFile.path]
+            p.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
             let ok = (try? p.run()) != nil && { p.waitUntilExit(); return p.terminationStatus == 0 }()
             await MainActor.run {
                 self.voiceEngine = ok ? .ready : .failed("The voice engine is installed but doesn't start. Install it again.")
-                if ok { self.pump(); self.removeOldKokoro() }
+                if ok { self.pump(); self.removeOldParadee() }
             }
         }
     }
 
-    /// The earlier engine (Kokoro, ~470 MB) is no longer used once Paradee works.
-    private func removeOldKokoro() {
-        guard render == nil, FileManager.default.fileExists(atPath: oldKokoroDirectory.path) else { return }
-        try? FileManager.default.removeItem(at: oldKokoroDirectory)
+    /// Paradee (~250 MB) is no longer used on the Mac once Kokoro works.
+    private func removeOldParadee() {
+        guard render == nil, FileManager.default.fileExists(atPath: oldParadeeDirectory.path) else { return }
+        try? FileManager.default.removeItem(at: oldParadeeDirectory)
     }
+
+    // MARK: Re-narrate
+
+    /// Books being narrated again with Kokoro (chapters another model made are redone).
+    @Published public private(set) var renarrating: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "habla.renarrate") ?? []) {
+        didSet { UserDefaults.standard.set(Array(renarrating), forKey: "habla.renarrate") }
+    }
+
+    /// Has chapters narrated by another model (Paradee): offer "Re-narrate with Kokoro".
+    public func canRenarrate(_ m: BookManifest) -> Bool {
+        m.canNarrate && !renarrating.contains(m.id) && m.narrated(byOtherThan: Self.kokoroModel)
+    }
+
+    /// Narrates the book again with Kokoro. Its old audio keeps playing until each chapter is replaced.
+    public func renarrate(_ id: String) {
+        guard let m = books.first(where: { $0.id == id }), canRenarrate(m) else { return }
+        renarrating.insert(id)
+        narrate(id)
+    }
+
+    /// Every book with Paradee audio.
+    public var renarratable: [BookManifest] { books.filter(canRenarrate) }
+    public func renarrateAll() { for m in renarratable { renarrate(m.id) } }
 
     public func installVoiceEngine(script: URL) {
         voiceEngine = .installing("Starting…")

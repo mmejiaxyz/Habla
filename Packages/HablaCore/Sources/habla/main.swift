@@ -7,14 +7,14 @@ import HablaCore
 //   habla list                                    list processed books
 //   habla inspect <id> [chapter]                  show chapters / sentences / spoken text
 //   habla voices                                  list the voices
-//   habla render <id> [--voice af_heart] [--speed 1.0] [--chapters 3,4] [--engine paradee|tone]
+//   habla render <id> [--voice af_heart] [--speed 1.0] [--chapters 3,4] [--engine kokoro|paradee|tone]
 //   habla serve [--port 8787] [--token SECRET]    share the library with the iPhone
 //   habla pull <http://mac:8787> <id> <dir>       download a book like the iPhone does
 //   habla export <id> <file.habla>                single-file bundle for AirDrop
 //   habla xteink find|setup|send [--host IP]      Xteink (CrossPoint, File Transfer mode open)
 //
 // Options: --library DIR (default ~/Library/Application Support/Habla Studio/Library)
-//          --voice-engine DIR  (default: the Mac app's voice engine)
+//          --voice-engine DIR  (default: the Mac app's Kokoro engine; with --engine paradee, its old Paradee folder)
 
 let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     .appendingPathComponent("Habla Studio", isDirectory: true)
@@ -39,7 +39,9 @@ let library = customLibrary ?? support.appendingPathComponent("Library")
 let dataDir = customLibrary ?? support
 let progressFile = customLibrary.map { $0.appendingPathComponent(".progress.json") } ?? support.appendingPathComponent("progress.json")
 let cacheDir = customLibrary.map { $0.appendingPathComponent(".cache") } ?? support.appendingPathComponent("SentenceCache")
-let voiceDir: URL = option("voice-engine").map { URL(fileURLWithPath: $0) } ?? support.appendingPathComponent("voice")
+let engineName = option("engine") ?? "kokoro"
+let voiceDir: URL = option("voice-engine").map { URL(fileURLWithPath: $0) }
+    ?? support.appendingPathComponent(engineName == "paradee" ? "voice" : "kokoro")
 try? FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
 
 func bundle(_ id: String) -> BookBundle {
@@ -101,7 +103,8 @@ do {
         }
 
     case "voices":
-        let engine = VoiceEngine(configuration: .init(toolsDirectory: voiceDir))
+        let engine: TTSEngine = engineName == "paradee" ? VoiceEngine(configuration: .init(toolsDirectory: voiceDir))
+            : KokoroEngine(configuration: .init(toolsDirectory: voiceDir))
         print(try await engine.voices().joined(separator: "  "))
         await engine.shutdown()
 
@@ -110,12 +113,13 @@ do {
         let renderBook = BookBundle(url: BookBundle.url(for: args[0], in: library))
         let bookLanguage = (try? renderBook.manifest().language) ?? "en"
         guard BookLanguage.hasVoice(bookLanguage) else { fail("There's no \(BookLanguage.name(bookLanguage)) voice yet: this book is read-only.") }
-        let voiceID = option("voice") ?? BookLanguage.defaultVoice(for: bookLanguage)
+        let voiceID = option("voice") ?? BookLanguage.defaultVoice(for: bookLanguage, narrator: engineName == "paradee" ? .paradee : .kokoro)
         let speed = Double(option("speed") ?? "1.0") ?? 1.0
         let only = option("chapters").map { Set($0.split(separator: ",").compactMap { Int($0) }) }
-        let engineName = option("engine") ?? "paradee"
         let engine: TTSEngine = engineName == "tone" ? ToneEngine()
-            : EnginePool((0..<EnginePool.recommendedWorkers()).map { _ in VoiceEngine(configuration: .init(toolsDirectory: voiceDir)) })
+            : engineName == "paradee"
+            ? EnginePool((0..<EnginePool.recommendedWorkers()).map { _ in VoiceEngine(configuration: .init(toolsDirectory: voiceDir)) })
+            : EnginePool((0..<EnginePool.kokoroWorkers()).map { _ in KokoroEngine(configuration: .init(toolsDirectory: voiceDir)) })
         let pipeline = RenderPipeline(engine: engine, cacheDirectory: cacheDir)
         let b = bundle(args[0])
         let start = Date()

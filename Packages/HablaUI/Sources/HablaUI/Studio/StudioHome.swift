@@ -108,7 +108,7 @@ extension StudioWindowView {
     var engineCard: some View {
         let (line, detail): (String, String) = {
             switch store.voiceEngine {
-            case .ready: return ("Paradee · ready", narratingIDs.isEmpty ? "Idle" : "Narrating \(narratingIDs.count) book\(narratingIDs.count == 1 ? "" : "s")")
+            case .ready: return ("Kokoro · ready", narratingIDs.isEmpty ? "Idle" : "Narrating \(narratingIDs.count) book\(narratingIDs.count == 1 ? "" : "s")")
             case .checking: return ("Checking…", "")
             case .missing: return ("Not installed", "Books stay readable without it")
             case .installing(let step): return ("Installing…", step)
@@ -149,6 +149,7 @@ extension StudioWindowView {
                 .padding(.bottom, 22)
 
                 if let hero = heroBook { narratingCard(hero).padding(.bottom, 40) }
+                if !narratingOnly, !store.renarratable.isEmpty { renarrateBanner.padding(.bottom, 28) }
 
                 SectionRule(narratingOnly ? "In the queue" : "All books", count: shelf.count)
                     .padding(.bottom, 18)
@@ -165,6 +166,17 @@ extension StudioWindowView {
                 }
             }
             .padding(.horizontal, 40).padding(.top, 34).padding(.bottom, 40)
+        }
+    }
+
+    /// Books narrated with Paradee before Kokoro came back: one click redoes them all.
+    var renarrateBanner: some View {
+        let n = store.renarratable.count
+        return HStack(spacing: 14) {
+            Text("\(n) book\(n == 1 ? " was" : "s were") narrated with Paradee. Their audio stays until you re-narrate.")
+                .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim)
+            Spacer()
+            Button("Re-narrate all with Kokoro") { store.renarrateAll() }.disabled(store.voiceEngine != .ready)
         }
     }
 
@@ -235,6 +247,9 @@ extension StudioWindowView {
         if m.canNarrate && !store.item(m).isFullyNarrated && !store.queue.contains(m.id) && store.render?.bookID != m.id {
             Button("Narrate") { store.narrate(m.id) }.disabled(store.voiceEngine != .ready)
         }
+        if store.canRenarrate(m) {
+            Button("Re-narrate with Kokoro") { store.renarrate(m.id) }.disabled(store.voiceEngine != .ready)
+        }
         Button("Show original in Finder") { NSWorkspace.shared.activateFileViewerSelecting([BookImporter.originalURL(for: m.id, in: store.library)]) }
         Divider()
         Button("Delete…", role: .destructive) { confirmDelete = m }
@@ -270,7 +285,7 @@ extension StudioWindowView {
                     Text(msg).font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.6)).lineLimit(2)
                 default:
                     Text("Install the voice engine").font(.ui(15, weight: .medium)).foregroundStyle(Theme.ink)
-                    Text("Paradee runs on this Mac, free and offline. One download of about 250 MB.")
+                    Text("Kokoro runs on this Mac, free and offline. One download of about 340 MB.")
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.ink.opacity(0.6))
                 }
             }
