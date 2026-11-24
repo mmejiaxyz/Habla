@@ -237,6 +237,16 @@ public actor BridgeSync {
         save()
     }
 
+    /// Removes a device from the account's list (one that was wiped or replaced): its document
+    /// goes from the bridge, so nothing waits for it any more. A device still running just
+    /// shows up again at its next sync.
+    public func forget(deviceID id: String) async throws {
+        let name = keys.objectName("state/\(id)")
+        try await client.delete(.state, name)
+        saved.docs[name] = nil; saved.etags[name] = nil; saved.seen[name] = nil
+        save()
+    }
+
     /// The account's other devices (helpers included), for the device list.
     public func devices() -> [AccountDevice] {
         saved.docs.map { name, d in

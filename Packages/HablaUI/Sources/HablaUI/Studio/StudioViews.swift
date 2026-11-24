@@ -18,6 +18,7 @@ public struct StudioWindowView: View {
     /// Redesign: sidebar "Narrating" filter.
     @State var narratingOnly = false
     @State private var showLinkMac = false
+    @State private var forgetting: AccountDevice?
 
     public init(store: StudioStore, updater: StudioUpdater = StudioUpdater(), installScript: URL?, openReader: @escaping (String) -> Void) {
         self.store = store; self.updater = updater; self.installScript = installScript; self.openReader = openReader
@@ -161,6 +162,7 @@ public struct StudioWindowView: View {
                     let recent = d.online || Date().timeIntervalSince(d.lastSeen) < 600
                     let what = d.kind == .helper ? "Helps narrate" : "\(d.books) book\(d.books == 1 ? "" : "s")"
                     deviceRow(on: recent, name: d.name, detail: "\(what) · synced \(Format.ago(d.lastSeen))")
+                        .contextMenu { Button("Remove “\(d.name)” from the account…", role: .destructive) { forgetting = d } }
                 }
             }
             ForEach(store.helping) { h in
@@ -178,6 +180,9 @@ public struct StudioWindowView: View {
             }
         }
         .sheet(isPresented: $showLinkMac) { LinkMacSheet(store: store) { showLinkMac = false } }
+        .confirmationDialog("Remove “\(forgetting?.name ?? "")”?", isPresented: Binding(get: { forgetting != nil }, set: { if !$0 { forgetting = nil } })) {
+            Button("Remove", role: .destructive) { if let d = forgetting { store.forgetDevice(d) }; forgetting = nil }
+        } message: { Text("For a device you wiped or no longer use. If it's still running, it reappears the next time it syncs.") }
         .onAppear { if !store.bridgeReady && !store.helperOnly { showLinkMac = true } }   // a new Mac: its join QR code first
     }
 

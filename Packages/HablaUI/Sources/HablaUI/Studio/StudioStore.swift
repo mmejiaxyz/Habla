@@ -200,6 +200,16 @@ public final class StudioStore: ObservableObject {
     /// The account's QR code / code to paste: a habla://account link (works like a password).
     public var accountLink: URL? { currentBridgeConfig.map { AccountCode.url($0, name: accountName) } }
 
+    /// Removes a device from the account (e.g. this Mac before a clean install).
+    public func forgetDevice(_ d: AccountDevice) {
+        guard let bridge else { return }
+        accountDevices.removeAll { $0.id == d.id }
+        Task {
+            try? await bridge.forget(deviceID: d.id)
+            accountDevices = await bridge.devices()
+        }
+    }
+
     /// Renames the account on every device.
     public func renameAccount(_ name: String) {
         let n = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
