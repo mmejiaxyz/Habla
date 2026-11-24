@@ -1,5 +1,33 @@
 # Cloud bridge (sync away from home)
 
+## Accounts
+
+An **account** is one library on every device: a name plus a QR code. The QR code is a
+`habla://account?u=<bridge url>&k=<library key, base64url>&n=<name>` link (the iPhone Camera
+opens it; on a Mac the same text is pasted under Account…). It holds the library key, so it
+works like a password. It replaces iPhone↔Mac pairing: phones paired earlier turn the bridge
+key their Mac gave them into the account on first launch.
+
+- **Name**: `settings.name` + `nameChangedAt` in the device documents (latest rename wins),
+  merged separately from the voice.
+- **Whole library everywhere**: any device holding a book that another device of the account
+  lacks (not in its `has` at that revision, and not in its `declined`) may send it. Of the
+  holders of the newest revision that are running (or itself), a Mac sends before an iPhone,
+  then the lowest device id, so one device uploads. Unfinished books wait until narrated,
+  except an iPhone's copy of a book no Mac has: it goes once and the Mac finishes it. iPhones
+  upload books only on Wi-Fi (not mobile data or Low Data Mode).
+- **Deletes everywhere**: `ledger: [{bookID, deleted, at}]` in every device document (latest
+  event per book wins; future dates are clamped). A device removes local books the ledger says
+  are deleted; importing the book again records it as added. An iPhone's "Remove download" is
+  local only: the book goes in that iPhone's `declined`, so nobody sends it there again.
+- **Wi-Fi without pairing**: from the library key, HKDF also derives `lan` (HMAC key) and
+  `lan-token`. A Mac advertises `acct = HMAC(lan, "tag")[0..8]` in its Bonjour TXT record. An
+  iPhone of the account sends a random `X-Habla-Nonce` to `GET /v1`; the Mac answers
+  `accountProof = HMAC(lan, fingerprint ‖ nonce)` for its own certificate. The iPhone checks
+  it against the certificate it saw (a machine in the middle has another one and no key), pins
+  that certificate, and authenticates with `X-Habla-Token: <lan-token>`.
+
+
 On the same Wi-Fi, the iPhone and the Mac talk directly (Bonjour + pinned TLS, see `Sync/`).
 When they are apart, they meet through a **Cloudflare bridge**: one Worker in front of one
 R2 bucket. Cloudflare only ever stores **ciphertext under random-looking names**. It never
@@ -162,9 +190,8 @@ never overwrite each other. Readers merge every document:
 files: [{path, size, sha256, chunks: Int}], createdAt, target?}`. A receiver rebuilds each file from
 its chunks, checks the SHA-256 from the manifest, and installs the book the same way LAN
 sync does, when it has more audio than the local copy (or the same audio, newer). The sender
-deletes the chunks once every recipient lists the book in `has` (EPUBs: once the target
-lists the transfer id in `received`). A Mac sends the books it narrated or imported; the
-iPhone only the books it narrated itself; nobody re-sends a book it received.
+deletes the chunks once every recipient lists the book in `has` or in `declined` (EPUBs: once
+the target lists the transfer id in `received`). See **Accounts** below for who sends a book.
 
 ## Cadence
 

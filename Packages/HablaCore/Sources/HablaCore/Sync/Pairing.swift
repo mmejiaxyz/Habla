@@ -95,6 +95,19 @@ public struct ServerHello: Codable, Sendable {
     /// True when this server requires pairing (Habla Studio). `habla serve` is open.
     public var pairing: Bool?
     public var inbox: String?
+    /// HMAC of (certificate fingerprint ‖ the caller's nonce) under the account's Wi-Fi key.
+    public var accountProof: String?
+}
+
+/// A value shared across threads.
+public final class Locked<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: T
+    public init(_ value: T) { _value = value }
+    public var value: T {
+        get { lock.withLock { _value } }
+        set { lock.withLock { _value = newValue } }
+    }
 }
 
 public struct PairRequest: Codable, Sendable {

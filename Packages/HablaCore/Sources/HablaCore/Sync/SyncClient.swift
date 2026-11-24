@@ -36,6 +36,9 @@ public struct SyncSummary: Sendable {
 public struct SyncClient: Sendable {
     public let baseURL: URL
     public var accessToken: String?
+    /// Sent with every request so the Mac can show which device synced.
+    public var deviceID: String?
+    public var deviceName: String?
     let session: URLSession
 
     public init(baseURL: URL, accessToken: String? = nil, session: URLSession = .shared) {
@@ -168,6 +171,15 @@ public struct SyncClient: Sendable {
         try await getJSON(ServerHello.self, "v1")
     }
 
+    /// The hello with the Mac's proof that it holds the account key (bound to `nonce`).
+    public func hello(nonce: String) async throws -> ServerHello {
+        var r = request("v1")
+        r.setValue(nonce, forHTTPHeaderField: "X-Habla-Nonce")
+        let (data, response) = try await perform(r)
+        try check(response, "v1")
+        return try JSON.decoder.decode(ServerHello.self, from: data)
+    }
+
     /// Pairs with the code shown on the Mac. `fingerprint`: the certificate this session saw
     /// (from the QR code, or recorded by `PinnedTrust` on first contact).
     public func pair(code: String, fingerprint: String, deviceID: String, deviceName: String) async throws -> PairResponse {
@@ -209,6 +221,10 @@ public struct SyncClient: Sendable {
         r.httpMethod = method
         r.timeoutInterval = 30
         if let accessToken { r.setValue(accessToken, forHTTPHeaderField: SyncProtocol.tokenHeader) }
+        if let deviceID { r.setValue(deviceID, forHTTPHeaderField: "X-Habla-Device") }
+        if let deviceName {
+            r.setValue(deviceName.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "Device", forHTTPHeaderField: "X-Habla-Device-Name")
+        }
         return r
     }
 
@@ -260,7 +276,11 @@ public final class ServiceBrowser: @unchecked Sendable {
         public var url: URL
         /// The library id from Bonjour TXT (`id`); nil for old servers / `habla serve`.
         public var libraryID: String?
-        public init(name: String, url: URL, libraryID: String? = nil) { self.name = name; self.url = url; self.libraryID = libraryID }
+        /// The account tag from Bonjour TXT (`acct`): the Mac belongs to the account with this tag.
+        public var account: String?
+        public init(name: String, url: URL, libraryID: String? = nil, account: String? = nil) {
+            self.name = name; self.url = url; self.libraryID = libraryID; self.account = account
+        }
     }
 
     private var browser: NWBrowser?
@@ -268,7 +288,7 @@ public final class ServiceBrowser: @unchecked Sendable {
     private var resolving: [String: NWConnection] = [:]
     public var onChange: (@Sendable ([Service]) -> Void)?
     private var services: [String: Service] = [:]
-    private var txt: [String: (id: String?, tls: Bool)] = [:]
+    private var txt: [String: (id: String?, tls: Bool, acct: String?)] = [:]
 
     public init() {}
 
@@ -282,8 +302,8 @@ public final class ServiceBrowser: @unchecked Sendable {
                 guard case let .service(name, _, _, _) = r.endpoint else { continue }
                 names.insert(name)
                 if case let .bonjour(record) = r.metadata {
-                    let info = (id: record["id"], tls: record["tls"] == "1")
-                    if let old = self.txt[name], old.id != info.id || old.tls != info.tls { self.services[name] = nil }
+                    let info = (id: record["id"], tls: record["tls"] == "1", acct: record["acct"])
+                    if let old = self.txt[name], old.id != info.id || old.tls != info.tls || old.acct != info.acct { self.services[name] = nil }
                     self.txt[name] = info
                 }
             }
@@ -317,7 +337,7 @@ public final class ServiceBrowser: @unchecked Sendable {
                     if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }
                     let info = self.txt[name]
                     if let url = URL(string: "\(info?.tls == true ? "https" : "http")://\(h):\(port.rawValue)") {
-                        self.services[name] = Service(name: name, url: url, libraryID: info?.id)
+                        self.services[name] = Service(name: name, url: url, libraryID: info?.id, account: info?.acct)
                         self.onChange?(Array(self.services.values))
                     }
                 }

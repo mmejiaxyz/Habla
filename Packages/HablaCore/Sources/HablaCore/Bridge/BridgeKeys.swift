@@ -16,16 +16,38 @@ public struct BridgeKeys: Sendable {
     let encKey: SymmetricKey
     let nameKey: SymmetricKey
     public let token: String
+    /// Wi-Fi: the key a Mac proves it holds (so an iPhone can pin its certificate) and the
+    /// token devices of the account send it. Never sent to the bridge.
+    let lanKey: SymmetricKey
+    public let lanToken: String
 
     public init(libraryKey: Data) {
         let master = SymmetricKey(data: libraryKey)
         func derive(_ info: String) -> SymmetricKey {
             HKDF<SHA256>.deriveKey(inputKeyMaterial: master, salt: Data("habla-bridge-v1".utf8), info: Data(info.utf8), outputByteCount: 32)
         }
+        func base64url(_ k: SymmetricKey) -> String {
+            k.withUnsafeBytes { Data($0) }.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        }
         encKey = derive("enc")
         nameKey = derive("name")
-        token = derive("token").withUnsafeBytes { Data($0) }.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        token = base64url(derive("token"))
+        lanKey = derive("lan")
+        lanToken = base64url(derive("lan-token"))
+    }
+
+    /// What a Mac advertises on Wi-Fi (Bonjour TXT `acct`): the same for every device of the
+    /// account, meaningless to anyone else.
+    public var accountTag: String {
+        HMAC<SHA256>.authenticationCode(for: Data("tag".utf8), using: lanKey).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A Mac's answer to an iPhone's random nonce, bound to the certificate the iPhone sees: a
+    /// machine in the middle (other certificate) can't produce it without the account key.
+    public func lanProof(fingerprint: String, nonce: String) -> String {
+        HMAC<SHA256>.authenticationCode(for: Data("\(fingerprint.lowercased())|\(nonce)".utf8), using: lanKey)
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     public static func newLibraryKey() -> Data {

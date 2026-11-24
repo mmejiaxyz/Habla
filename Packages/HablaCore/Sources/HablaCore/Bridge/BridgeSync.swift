@@ -50,8 +50,25 @@ public struct AccountSettings: Codable, Equatable, Sendable {
     /// The narration voice for every book on every device (Heart unless changed in Settings).
     public var voice: String
     public var changedAt: Date
+    /// The account's name (shown on every device; latest rename wins).
+    public var name: String? = nil
+    public var nameChangedAt: Date? = nil
     public init(voice: String, changedAt: Date) { self.voice = voice; self.changedAt = changedAt }
     public static let initial = AccountSettings(voice: "af_heart", changedAt: Date(timeIntervalSince1970: 0))
+
+    /// Takes whatever `other` changed later (voice and name separately).
+    mutating func merge(_ other: AccountSettings) {
+        if other.changedAt > changedAt { voice = other.voice; changedAt = other.changedAt }
+        if let n = other.name, let at = other.nameChangedAt, at > (nameChangedAt ?? .distantPast) { name = n; nameChangedAt = at }
+    }
+}
+
+/// A book added to or deleted from the account's library (latest event per book wins), so a
+/// book deleted on one device goes from every device, and adding it again brings it back.
+public struct BookEvent: Codable, Equatable, Sendable {
+    public var bookID: String
+    public var deleted: Bool
+    public var at: Date
 }
 
 public struct HeldBook: Codable, Equatable, Sendable {
@@ -83,6 +100,20 @@ public struct DeviceDocument: Codable, Equatable, Sendable {
     /// Its narration speed and queue (nil: it can't narrate now, e.g. no voice installed).
     public var narrator: NarratorStatus? = nil
     public var settings: AccountSettings? = nil
+    /// Added/deleted books (every device keeps the whole list).
+    public var ledger: [BookEvent]? = nil
+    /// Books this device chose not to keep (an iPhone's "Remove download"): nobody sends them here.
+    public var declined: [String]? = nil
+}
+
+/// Another device of the account, for the device list.
+public struct AccountDevice: Identifiable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var kind: DeviceDocument.Role
+    public var lastSeen: Date
+    public var online: Bool
+    public var books: Int
 }
 
 /// Sync through the Cloudflare bridge (Docs/cloud-bridge.md). Every byte leaves this device sealed.
@@ -126,6 +157,31 @@ public actor BridgeSync {
         var narratedHere: [String] = []
         /// Helper: books it was sent to narrate (the only ones it keeps, until collected).
         var jobs: [String] = []
+        /// The library's adds and deletes, merged from every device.
+        var ledger: [String: BookEvent] = [:]
+        /// Books this device doesn't want sent to it.
+        var declined: Set<String> = []
+
+        init() {}
+        // Older state files lack the newer fields: read what's there, default the rest.
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            etags = try c.decodeIfPresent([String: String].self, forKey: .etags) ?? [:]
+            docs = try c.decodeIfPresent([String: DeviceDocument].self, forKey: .docs) ?? [:]
+            outbox = try c.decodeIfPresent([Transfer].self, forKey: .outbox) ?? []
+            received = try c.decodeIfPresent([String].self, forKey: .received) ?? []
+            published = try c.decodeIfPresent([String: Int].self, forKey: .published) ?? [:]
+            uploadedHash = try c.decodeIfPresent(String.self, forKey: .uploadedHash)
+            settings = try c.decodeIfPresent(AccountSettings.self, forKey: .settings) ?? .initial
+            seen = try c.decodeIfPresent([String: Date].self, forKey: .seen) ?? [:]
+            online = try c.decodeIfPresent(Set<String>.self, forKey: .online) ?? []
+            pausedUntil = try c.decodeIfPresent(Date.self, forKey: .pausedUntil)
+            receivedBooks = try c.decodeIfPresent([String: Int].self, forKey: .receivedBooks) ?? [:]
+            narratedHere = try c.decodeIfPresent([String].self, forKey: .narratedHere) ?? []
+            jobs = try c.decodeIfPresent([String].self, forKey: .jobs) ?? []
+            ledger = try c.decodeIfPresent([String: BookEvent].self, forKey: .ledger) ?? [:]
+            declined = try c.decodeIfPresent(Set<String>.self, forKey: .declined) ?? []
+        }
     }
     var saved: Saved
     public var pausedUntil: Date? { saved.pausedUntil }
@@ -135,8 +191,58 @@ public actor BridgeSync {
     /// Changed in Settings on this device: it becomes every device's setting.
     public func setVoice(_ voice: String) {
         guard voice != saved.settings.voice else { return }
-        saved.settings = AccountSettings(voice: voice, changedAt: Date())
+        saved.settings.voice = voice
+        saved.settings.changedAt = Date()
         save()
+    }
+
+    /// Renames the account on every device.
+    public func setName(_ name: String) {
+        let n = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
+        guard !n.isEmpty, n != saved.settings.name else { return }
+        saved.settings.name = n
+        saved.settings.nameChangedAt = Date()
+        save()
+    }
+
+    // MARK: - The library's adds and deletes
+
+    /// A book was added here (imported): if it was deleted earlier, it's back everywhere.
+    public func recordAdded(_ id: String) {
+        guard saved.ledger[id]?.deleted == true else { return }   // never deleted: nothing to say
+        saved.ledger[id] = BookEvent(bookID: id, deleted: false, at: Date())
+        saved.declined.remove(id)
+        save()
+    }
+
+    /// A book was deleted here: it goes from every device of the account.
+    public func recordDeleted(_ id: String) {
+        saved.ledger[id] = BookEvent(bookID: id, deleted: true, at: Date())
+        saved.declined.remove(id)
+        save()
+    }
+
+    public func isDeleted(_ id: String) -> Bool { saved.ledger[id]?.deleted == true }
+    public var deletedIDs: Set<String> { Set(saved.ledger.values.filter(\.deleted).map(\.bookID)) }
+
+    /// Books still on this device that were deleted on another one (remove them, then sync).
+    public func booksDeletedElsewhere() -> [String] {
+        localBooks().map(\.id).filter { isDeleted($0) }
+    }
+
+    /// iPhone: "Remove download" (nobody sends it here), or downloaded again.
+    public func setDeclined(_ id: String, _ declined: Bool) {
+        guard declined != saved.declined.contains(id) else { return }
+        if declined { saved.declined.insert(id) } else { saved.declined.remove(id) }
+        save()
+    }
+
+    /// The account's other devices (helpers included), for the device list.
+    public func devices() -> [AccountDevice] {
+        saved.docs.map { name, d in
+            AccountDevice(id: d.deviceID, name: d.deviceName, kind: d.kind, lastSeen: max(saved.seen[name] ?? d.updatedAt, d.updatedAt),
+                          online: saved.online.contains(name), books: d.has.count)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
     var narrator: NarratorStatus?
     /// A device counts as running if it checked in this recently.
@@ -200,7 +306,10 @@ public actor BridgeSync {
                 for p in doc.positions { progress.merge(p) }
                 markers.merge(doc.markers)
             }
-            if let s = doc.settings, s.changedAt > saved.settings.changedAt { saved.settings = s }
+            if let s = doc.settings { saved.settings.merge(s) }
+            for e in doc.ledger ?? [] where e.at > (saved.ledger[e.bookID]?.at ?? .distantPast) {
+                saved.ledger[e.bookID] = e.at > Date().addingTimeInterval(300) ? BookEvent(bookID: e.bookID, deleted: e.deleted, at: Date()) : e
+            }
         }
         for gone in saved.docs.keys where !seen.contains(gone) { saved.docs[gone] = nil; saved.etags[gone] = nil; saved.seen[gone] = nil }
         save()
@@ -210,14 +319,15 @@ public actor BridgeSync {
         if role == .helper {
             return DeviceDocument(deviceID: deviceID, deviceName: deviceName, kind: role, updatedAt: Date(), positions: [], markers: [],
                                   has: [], outbox: saved.outbox, recipients: recipients(), received: saved.received,
-                                  lastActive: nil, narrator: narrator, settings: nil)
+                                  lastActive: nil, narrator: narrator, settings: nil, ledger: nil, declined: nil)
         }
         return DeviceDocument(deviceID: deviceID, deviceName: deviceName, kind: role, updatedAt: Date(),
                        positions: progress.all.sorted { $0.bookID < $1.bookID },
                        markers: markers.all.sorted { $0.id.uuidString < $1.id.uuidString },
                        has: localBooks().map { HeldBook(bookID: $0.id, revision: $0.revision) }.sorted { $0.bookID < $1.bookID },
                        outbox: saved.outbox, recipients: recipients(), received: saved.received,
-                       lastActive: nil, narrator: narrator, settings: saved.settings)
+                       lastActive: nil, narrator: narrator, settings: saved.settings,
+                       ledger: saved.ledger.values.sorted { $0.bookID < $1.bookID }, declined: saved.declined.sorted())
     }
 
     /// Uploads this device's document when its content changed.
@@ -281,25 +391,53 @@ public actor BridgeSync {
 
     public func deviceName(_ id: String) -> String? { id == deviceID ? deviceName : others.first { $0.deviceID == id }?.deviceName }
 
-    // MARK: - Books, Mac → phones
+    // MARK: - Books, between every device
 
-    /// Mac: sends every finished book the phones don't have yet, if it fits the free storage.
-    /// Returns the ids sent. Books that don't fit wait for a later call.
+    /// Whether `d` still needs revision `rev` of book `id` (it hasn't got it and didn't decline it).
+    func lacks(_ d: DeviceDocument, _ id: String, _ rev: Int) -> Bool {
+        !(d.declined ?? []).contains(id) && !d.has.contains { $0.bookID == id && $0.revision >= rev }
+    }
+
+    /// Of the devices holding the newest copy of a book (this one included), the one that sends
+    /// it: a running Mac before an iPhone, then the lowest id, so only one device uploads it.
+    func sender(of m: BookManifest) -> String {
+        var holders: [(id: String, kind: DeviceDocument.Role)] = [(deviceID, role)]
+        for d in others where d.kind != .helper && isActive(d) {
+            guard let h = d.has.first(where: { $0.bookID == m.id }) else { continue }
+            if h.revision > m.revision { return d.deviceID }        // a newer copy elsewhere: not us
+            if h.revision == m.revision { holders.append((d.deviceID, d.kind)) }
+        }
+        return holders.min { a, b in
+            if (a.kind == .mac) != (b.kind == .mac) { return a.kind == .mac }
+            return a.id < b.id
+        }!.id
+    }
+
+    /// Sends every book some device of the account doesn't have yet, when this device is the
+    /// one to send it and it fits the free storage. Returns the ids sent. Books that don't fit
+    /// wait for a later call. `uploads: false` (an iPhone on mobile data) sends nothing.
     @discardableResult
-    public func publishNewBooks() async throws -> [String] {
+    public func publishNewBooks(uploads: Bool = true) async throws -> [String] {
         var sent: [String] = []
+        guard uploads else { return sent }
         try await guarded {
             let targets = self.recipients()
             guard !targets.isEmpty else { return }
             let held = self.others.filter { targets.contains($0.deviceID) }
-            // A Mac sends what it narrated (or imported, text-only); a phone only what it narrated.
+            let macHas = Set(self.booksOnMac())
             let mine = self.localBooks().filter { m in
-                m.isFullyRendered && self.saved.receivedBooks[m.id] != m.revision
-                    && (self.role == .mac || (self.role == .phone ? self.saved.narratedHere : self.saved.jobs).contains(m.id))
+                guard !self.isDeleted(m.id) else { return false }
+                if self.role == .helper { return m.isFullyRendered && self.saved.jobs.contains(m.id) }
+                // Unfinished books wait until they're narrated, unless no Mac has them at all
+                // (then an iPhone's copy is all there is, and a Mac can finish it).
+                return m.isFullyRendered || (self.role == .phone && !macHas.contains(m.id))
             }
             for m in mine {
-                guard m.revision > (self.saved.published[m.id] ?? 0),
-                      !held.allSatisfy({ $0.has.contains { $0.bookID == m.id && $0.revision >= m.revision } }) else { continue }
+                guard held.contains(where: { self.lacks($0, m.id, m.revision) }),
+                      // An unfinished book goes once (each narrated chapter makes a new revision):
+                      // the Mac that collects it finishes the narration.
+                      !self.saved.outbox.contains(where: { $0.kind == .book && $0.bookID == m.id && ($0.revision == m.revision || !m.isFullyRendered) }),
+                      self.role == .helper || self.sender(of: m) == self.deviceID else { continue }
                 let size = m.files.reduce(0) { $0 + $1.size }
                 let usage = try await self.client.usage()
                 guard usage.freeBytes > size + size / 10 else { self.log("bridge: waiting for room to send \(m.id)"); continue }
@@ -333,7 +471,8 @@ public actor BridgeSync {
             func ready(_ m: BookManifest) -> Int { m.chapters.filter { $0.audioStatus == .ready }.count }
             for doc in self.others {
                 for t in doc.outbox where t.kind == .book {
-                    guard let m = t.manifest, m.id == t.bookID, !installed.contains(m.id) else { continue }
+                    guard let m = t.manifest, m.id == t.bookID, !installed.contains(m.id),
+                          !self.isDeleted(m.id), !self.saved.declined.contains(m.id) else { continue }
                     if let mine = local[m.id] {
                         guard ready(m) > ready(mine) || (ready(m) == ready(mine) && m.revision > mine.revision) else { continue }
                     }
@@ -464,7 +603,8 @@ public actor BridgeSync {
                 let expired = now.timeIntervalSince(t.createdAt) > Self.transitLifetime
                 let delivered: Bool
                 switch t.kind {
-                case .book: delivered = !phones.isEmpty && phones.allSatisfy { $0.has.contains { $0.bookID == t.bookID && $0.revision >= (t.revision ?? 0) } }
+                case .book: delivered = !phones.isEmpty && phones.allSatisfy { !self.lacks($0, t.bookID ?? "", t.revision ?? 0) }
+                    || self.isDeleted(t.bookID ?? "")
                 case .epub: delivered = macReceived.contains(t.id)
                 }
                 if expired || delivered {
