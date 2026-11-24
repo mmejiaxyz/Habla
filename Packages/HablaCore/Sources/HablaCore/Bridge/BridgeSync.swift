@@ -101,6 +101,8 @@ public actor BridgeSync {
     var onEPUB: (@Sendable (URL, String?) -> Void)?
     /// Helper: a book it narrated reached every device; remove the local copy.
     var onJobDone: (@Sendable (String) -> Void)?
+    /// Books narrated here for another library: this sync never lists, sends or reports them.
+    var hidden: @Sendable () -> Set<String> = { [] }
     var log: @Sendable (String) -> Void = { _ in }
 
     /// Kept between launches: what other devices said last, our own transfers, what was sent.
@@ -153,8 +155,9 @@ public actor BridgeSync {
 
     public func configure(inbox: URL? = nil, onEPUB: (@Sendable (URL, String?) -> Void)? = nil,
                           onJobDone: (@Sendable (String) -> Void)? = nil,
+                          hidden: @escaping @Sendable () -> Set<String> = { [] },
                           log: @escaping @Sendable (String) -> Void = { _ in }) {
-        self.inbox = inbox; self.onEPUB = onEPUB; self.onJobDone = onJobDone; self.log = log
+        self.inbox = inbox; self.onEPUB = onEPUB; self.onJobDone = onJobDone; self.hidden = hidden; self.log = log
     }
 
     /// This device's narration speed and queue, published with the next sync.
@@ -486,7 +489,9 @@ public actor BridgeSync {
 
     func localBooks() -> [BookManifest] {
         let items = (try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)) ?? []
+        let hidden = hidden()
         return items.filter { $0.pathExtension == BookBundle.fileExtension }.compactMap { try? BookBundle(url: $0).manifest() }
+            .filter { !hidden.contains($0.id) }
     }
 
     /// Uploads every chunk not already on the bridge (a stopped upload resumes).

@@ -166,6 +166,9 @@ public struct StudioWindowView: View {
                         .contentShape(Rectangle())
                 }.buttonStyle(.plain)
             }
+            ForEach(store.helping) { h in
+                deviceRow(on: true, name: "Narrating for \(h.name)", detail: "Their books stay hidden from you and your devices")
+            }
             Button { showLinkMac = true } label: {
                 Text(store.bridgeReady ? "Link another Mac…" : "Join another Mac’s library…")
                     .font(Theme.grotesk(13)).foregroundStyle(Theme.accentText)
@@ -499,40 +502,121 @@ public struct StudioReaderWindow: View {
 
 /// "Pair your iPhone": a QR code for the iPhone camera, and the same code to type.
 /// Links a second Mac to this library's cloud bridge: both then narrate, sync places and
-/// marks, and new books go to whichever running Mac finishes them first.
+/// marks, and new books go to whichever running Mac finishes them first. Also where this Mac
+/// helps someone else's library (invite them, then paste their link code), and where a Mac
+/// without a library starts one from an invite.
 struct LinkMacSheet: View {
     @ObservedObject var store: StudioStore
     var onDone: () -> Void
     @State private var pasted = ""
-    @State private var failed = false
+    @State private var failed: String?
     @State private var copied = false
+    @State private var working = false
+    @State private var invite: String?
+    @State private var inviteCopied = false
+    @State private var helpName = ""
+    @State private var helpCode = ""
+    @State private var helpFailed: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Link another Mac").font(Theme.grotesk(17)).fontWeight(.semibold)
-            if let code = store.bridgeLinkCode {
-                Text("On the other Mac, open Habla, choose “Join another Mac’s library…”, and paste this code. It works like a password: only paste it on your own Macs.")
-                    .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
-                Button(copied ? "Copied" : "Copy link code") {
-                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string); copied = true
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Link another Mac").font(Theme.grotesk(17)).fontWeight(.semibold)
+                if let code = store.bridgeLinkCode {
+                    note("On your other Mac, open Habla, choose “Join another Mac’s library…”, and paste this code. It works like a password: only paste it on your own Macs, or on the Mac of someone helping you narrate.")
+                    Button(copied ? "Copied" : "Copy link code") { copy(code); copied = true }
+                    Divider()
+                    helpSomeone
+                    Divider()
                 }
-                Divider()
+                note(store.bridgeReady ? "Or move this Mac into another of your libraries by pasting its link code:"
+                                       : "Paste the link code of your other Mac, or an invite code someone sent you to start your own library:")
+                TextField(store.bridgeReady ? "habla-link:…" : "habla-link:… or habla-invite:…", text: $pasted).textFieldStyle(.roundedBorder)
+                Toggle("Help narrate only", isOn: $store.helperOnly)
+                Text("This Mac narrates books for your devices without showing them, syncing your places or marks, or keeping them afterwards.")
+                    .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+                if let failed { Text(failed).font(Theme.grotesk(12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+                HStack {
+                    Spacer()
+                    Button("Close", action: onDone)
+                    Button(working ? "Joining…" : "Join") { join() }
+                        .keyboardShortcut(.defaultAction).disabled(pasted.isEmpty || working)
+                }
             }
-            Text("Or join the library of another Mac by pasting its code here:")
-                .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim)
-            TextField("habla-link:…", text: $pasted).textFieldStyle(.roundedBorder)
-            Toggle("Help narrate only", isOn: $store.helperOnly)
-            Text("This Mac narrates books for your devices without showing them, syncing your places or marks, or keeping them afterwards.")
-                .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
-            if failed { Text("That isn't a Habla link code.").font(Theme.grotesk(12)).foregroundStyle(.red) }
+            .padding(22)
+        }
+        .frame(width: 460).frame(minHeight: 360, idealHeight: store.bridgeReady ? 640 : 360)
+    }
+
+    /// Someone with their own Mac and iPhone: invite them, then narrate for them.
+    var helpSomeone: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Help someone else").font(Theme.grotesk(15)).fontWeight(.semibold)
+            note("1. Send an invite code to someone with their own Mac. They paste it in “Join another Mac’s library…”. It works once, for 7 days.")
+            if let invite {
+                Button(inviteCopied ? "Copied" : "Copy invite code") { copy(invite); inviteCopied = true }
+            } else {
+                Button(working ? "Creating…" : "Create invite code") { makeInvite() }.disabled(working)
+            }
+            note("2. Paste the link code their Mac shows under “Link another Mac…”. This Mac then narrates their books in the background: you never see them, and they never reach your iPhone or your other Macs.")
             HStack {
-                Spacer()
-                Button("Close", action: onDone)
-                Button("Join") { if store.joinBridge(code: pasted) { onDone() } else { failed = true } }
-                    .keyboardShortcut(.defaultAction).disabled(pasted.isEmpty)
+                TextField("Their name", text: $helpName).textFieldStyle(.roundedBorder).frame(width: 120)
+                TextField("habla-link:…", text: $helpCode).textFieldStyle(.roundedBorder)
+                Button("Help") { help() }.disabled(helpCode.isEmpty)
+            }
+            if let helpFailed { Text(helpFailed).font(Theme.grotesk(12)).foregroundStyle(.red) }
+            ForEach(store.helping) { h in
+                HStack {
+                    let jobs = store.helpingJobs[h.id] ?? 0
+                    Text("Narrating for \(h.name)" + (jobs > 0 ? " · \(jobs) book\(jobs == 1 ? "" : "s")" : ""))
+                        .font(Theme.grotesk(13))
+                    Spacer()
+                    Button("Stop helping") { store.stopHelping(h) }
+                }
             }
         }
-        .padding(22).frame(width: 440)
+    }
+
+    func note(_ s: String) -> some View {
+        Text(s).font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+    }
+
+    func copy(_ s: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(s, forType: .string) }
+
+    func join() {
+        failed = nil
+        if BridgeCode.parseInvite(pasted) != nil {
+            guard !store.bridgeReady else { failed = "This Mac already has a library. Invite codes are for a Mac that has none."; return }
+            working = true
+            Task {
+                do { try await store.startLibrary(invite: pasted); working = false; pasted = "" }
+                catch { working = false; failed = "That invite didn’t work: it may be used, expired, or the bridge is unreachable. Ask for a new one." }
+            }
+            return
+        }
+        if store.joinBridge(code: pasted) { onDone() } else { failed = "That isn't a Habla link or invite code." }
+    }
+
+    func makeInvite() {
+        working = true
+        Task {
+            do { invite = try await store.makeInvite() } catch { helpFailed = "Couldn’t create an invite: \(error)" }
+            working = false
+        }
+    }
+
+    func help() {
+        helpFailed = nil
+        do {
+            try store.startHelping(name: helpName, code: helpCode)
+            helpName = ""; helpCode = ""
+        } catch StudioStore.HelpError.ownLibrary {
+            helpFailed = "That’s this Mac’s own library."
+        } catch StudioStore.HelpError.already {
+            helpFailed = "This Mac already helps that library."
+        } catch {
+            helpFailed = "That isn't a Habla link code."
+        }
     }
 }
 

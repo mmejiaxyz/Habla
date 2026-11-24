@@ -37,6 +37,9 @@ public final class LibraryServer: @unchecked Sendable {
     public var markers: MarkerStore?
     /// The cloud bridge settings handed to paired phones (only over this pinned, paired link).
     public var bridgeConfig: (@Sendable () -> BridgeConfig?)?
+    /// Books narrated here for someone else's library: never listed, served or synced to this
+    /// Mac's own devices (they don't exist as far as the server is concerned).
+    public var isHidden: (@Sendable (String) -> Bool)?
     /// Largest EPUB accepted from the iPhone.
     static let maxUpload = 200 * 1024 * 1024
 
@@ -265,7 +268,14 @@ public final class LibraryServer: @unchecked Sendable {
         }
     }
 
+    /// The books this library shows its devices (hidden guest books left out).
     public func manifests() -> [BookManifest] {
+        let hidden = isHidden
+        return allManifests().filter { !(hidden?($0.id) ?? false) }
+    }
+
+    /// Every bundle in the folder, guest books included: for the Mac app itself only.
+    public func allManifests() -> [BookManifest] {
         let items = (try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)) ?? []
         return items.filter { $0.pathExtension == BookBundle.fileExtension }
             .compactMap { try? BookBundle(url: $0).manifest() }
@@ -273,7 +283,7 @@ public final class LibraryServer: @unchecked Sendable {
     }
 
     func manifest(_ id: String) -> BookManifest? {
-        guard id.allSatisfy({ $0.isLetter || $0.isNumber }) else { return nil }
+        guard id.allSatisfy({ $0.isLetter || $0.isNumber }), !(isHidden?(id) ?? false) else { return nil }
         return try? BookBundle(url: BookBundle.url(for: id, in: library)).manifest()
     }
 

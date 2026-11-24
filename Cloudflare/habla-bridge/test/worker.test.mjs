@@ -131,3 +131,26 @@ test('cron deletes book chunks left too long', async () => {
   assert.equal(e.BRIDGE.m.size, 0);
   assert.equal((await (await call(e, 'GET', '/v1/transit')).json()).length, 0);
 });
+
+test('invites: need a library, work once, expire, and libraries are capped', async () => {
+  const e = await enrolled({ MAX_SPACES: '3' });
+  assert.equal((await call(e, 'POST', '/v1/invites', { token: 'other-' + 'b'.repeat(40) })).status, 401);
+  const make = async () => { const r = await call(e, 'POST', '/v1/invites'); assert.equal(r.status, 201); return (await r.json()).invite; };
+  const join = (invite, tok) => call(e, 'POST', '/v1/spaces', {
+    body: JSON.stringify({ tokenHash: createHash('sha256').update(tok).digest('hex') }), headers: { 'x-habla-invite': invite }, token: null });
+  const friend = 'friend-' + 'c'.repeat(40);
+  const inv = await make();
+  assert.equal((await join(inv, friend)).status, 201);
+  assert.equal((await call(e, 'GET', '/v1/state', { token: friend })).status, 200);
+  assert.equal((await join(inv, 'again-' + 'd'.repeat(40))).status, 403, 'used once');
+  assert.equal((await join('made-up', 'x-' + 'e'.repeat(40))).status, 403);
+  const old = await make();
+  e.DB.db.prepare('UPDATE invites SET expires = 0').run();
+  assert.equal((await join(old, 'late-' + 'f'.repeat(40))).status, 403, 'expired');
+  assert.equal((await join(await make(), 'third-' + 'g'.repeat(40))).status, 201);
+  const full = await join(await make(), 'fourth-' + 'h'.repeat(40));
+  assert.equal(full.status, 403);
+  assert.equal((await full.json()).cap, 'spaces');
+  await make(); await make();
+  assert.equal((await call(e, 'POST', '/v1/invites')).status, 429, 'at most 3 open invites');
+});

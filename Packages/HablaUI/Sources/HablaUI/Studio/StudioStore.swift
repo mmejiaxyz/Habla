@@ -2,6 +2,7 @@
 import Foundation
 import SwiftUI
 import AVFoundation
+import CryptoKit
 import HablaCore
 
 /// Habla Studio (Mac): library, narration queue (Paradee), the sync server for the iPhone,
@@ -41,7 +42,10 @@ public final class StudioStore: ObservableObject {
         case failed(String)
     }
 
+    /// This Mac's own books (what the shelf, its phones and its other Macs see).
     @Published public private(set) var books: [BookManifest] = []
+    /// Every book in the folder, including ones narrated here for someone else's library.
+    private var allBooks: [BookManifest] = []
     @Published public var selection: String?
     @Published public private(set) var importing: [String] = []
     @Published public var alert: String?
@@ -151,6 +155,10 @@ public final class StudioStore: ObservableObject {
             encrypted = true
         }
         server.markers = markers
+        let hidden = hiddenIDs
+        server.isHidden = { hidden.contains($0) }
+        hiddenIDs.set(Set(guestBooks.keys))
+        helping = loadHelping()
         devices = registry.all
         reload()
         checkVoiceEngine()
@@ -179,21 +187,14 @@ public final class StudioStore: ObservableObject {
 
     /// The code another Mac pastes to join this library's bridge (it holds the library key:
     /// treat it like a password).
-    public var bridgeLinkCode: String? {
-        guard let file = (try? Data(contentsOf: bridgeFileURL)).flatMap({ try? JSONDecoder().decode(BridgeFile.self, from: $0) }),
-              let key = file.libraryKey, let d = try? JSONEncoder().encode(BridgeConfig(url: file.url, libraryKey: key)) else { return nil }
-        return "habla-link:" + d.base64EncodedString()
-    }
+    public var bridgeLinkCode: String? { currentBridgeConfig.flatMap(BridgeCode.link) }
 
     public var bridgeReady: Bool { bridge != nil }
 
     /// Joins the bridge of another Mac from its link code. Returns false for a bad code.
     @discardableResult
     public func joinBridge(code: String) -> Bool {
-        let raw = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard raw.hasPrefix("habla-link:"), let d = Data(base64Encoded: String(raw.dropFirst("habla-link:".count))),
-              let config = try? JSONDecoder().decode(BridgeConfig.self, from: d), config.libraryKey.count == 32,
-              config.url.scheme == "https" else { return false }
+        guard let config = BridgeCode.parseLink(code) else { return false }
         try? FileManager.default.createDirectory(at: bridgeFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         saveBridgeFile(BridgeFile(url: config.url, libraryKey: config.libraryKey, enrollSecret: nil))
         try? FileManager.default.removeItem(at: support.appendingPathComponent("bridge-state.json"))
@@ -215,6 +216,7 @@ public final class StudioStore: ObservableObject {
                            progress: progress, markers: markers, library: library,
                            stateURL: support.appendingPathComponent("bridge-state.json"))
         let registry = registry
+        let hidden = hiddenIDs
         bridge = b
         bridgeLoop = Task { [weak self] in
             _ = registry
@@ -223,6 +225,8 @@ public final class StudioStore: ObservableObject {
                     guard let self, let id = try? DocumentDigest.sha256Prefix(of: file) else { return }
                     // Narrated with the account voice the sender used.
                     if let voice { UserDefaults.standard.set(voice, forKey: "habla.voice.\(id)") }
+                    // A book this Mac was narrating for someone else, now added by you: it's yours too.
+                    if self.guestBooks[id] != nil { self.guestBooks[id] = nil }
                     if self.books.contains(where: { $0.id == id }) {
                         // Already here: narrate this copy, and never delete it when the job ends.
                         if self.helperOnly { var k = self.helperKeep; k.insert(id); self.helperKeep = k }
@@ -238,7 +242,7 @@ public final class StudioStore: ObservableObject {
                     if self.helperKeep.contains(id) { var k = self.helperKeep; k.remove(id); self.helperKeep = k }
                     else { self.delete(id) }                     // delivered: nothing stays on a helper
                 }
-            })
+            }, hidden: { hidden.all })
             if let secret = file.enrollSecret {
                 do {
                     try await b.client.enroll(tokenHash: BridgeKeys(libraryKey: key).tokenHash, secret: secret)
@@ -291,6 +295,171 @@ public final class StudioStore: ObservableObject {
 
     var bridgeDeviceID: String { "mac-" + StudioStore.libraryID() }
 
+    // MARK: Helping someone else's library
+
+    /// Someone else's library this Mac narrates for (`Security/helping.json`, 0600). Its books
+    /// are narrated here but hidden from this Mac's shelf, its phones, its other Macs and the
+    /// Xteink, and deleted once their devices have them.
+    public struct HelpedLibrary: Codable, Identifiable, Equatable {
+        public var name: String
+        var url: URL
+        var libraryKey: Data
+        public var id: String { SHA256.hash(data: libraryKey).prefix(6).map { String(format: "%02x", $0) }.joined() }
+        var config: BridgeConfig { BridgeConfig(url: url, libraryKey: libraryKey) }
+    }
+    @Published public private(set) var helping: [HelpedLibrary] = []
+    /// Books narrating or waiting to be collected, per helped library (no titles).
+    @Published public private(set) var helpingJobs: [String: Int] = [:]
+    private var helpingRuns: [String: (sync: BridgeSync, loop: Task<Void, Never>, listener: BridgeListener)] = [:]
+    private var helpingKick: Task<Void, Never>?
+    /// Guest book id → the helped library it belongs to.
+    private var guestBooks: [String: String] = (UserDefaults.standard.dictionary(forKey: "habla.guestBooks") as? [String: String]) ?? [:] {
+        didSet {
+            UserDefaults.standard.set(guestBooks, forKey: "habla.guestBooks")
+            hiddenIDs.set(Set(guestBooks.keys))
+            if guestBooks != oldValue { reload() }
+        }
+    }
+    let hiddenIDs = HiddenIDs()
+
+    var helpingFileURL: URL { support.appendingPathComponent("Security/helping.json") }
+
+    private func loadHelping() -> [HelpedLibrary] {
+        (try? Data(contentsOf: helpingFileURL)).flatMap { try? JSONDecoder().decode([HelpedLibrary].self, from: $0) } ?? []
+    }
+    private func saveHelping() {
+        try? FileManager.default.createDirectory(at: helpingFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let d = try? JSONEncoder().encode(helping) else { return }
+        try? d.write(to: helpingFileURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: helpingFileURL.path)
+    }
+
+    public enum HelpError: Error, Equatable { case notALinkCode, ownLibrary, already }
+
+    /// Starts narrating for someone else's library from the link code their Mac shows.
+    public func startHelping(name: String, code: String) throws {
+        guard let config = BridgeCode.parseLink(code) else { throw HelpError.notALinkCode }
+        if let mine = currentBridgeConfig, mine.libraryKey == config.libraryKey { throw HelpError.ownLibrary }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let h = HelpedLibrary(name: trimmed.isEmpty ? "Someone" : trimmed, url: config.url, libraryKey: config.libraryKey)
+        guard !helping.contains(where: { $0.id == h.id }) else { throw HelpError.already }
+        helping.append(h)
+        saveHelping()
+        runHelping(h)
+    }
+
+    /// Stops helping: its sync ends, and its books still here (unfinished or uncollected) go.
+    public func stopHelping(_ h: HelpedLibrary) {
+        if let run = helpingRuns.removeValue(forKey: h.id) { run.loop.cancel(); run.listener.stop() }
+        helping.removeAll { $0.id == h.id }
+        saveHelping()
+        helpingJobs[h.id] = nil
+        try? FileManager.default.removeItem(at: helpingStateURL(h))
+        for (id, owner) in guestBooks where owner == h.id { delete(id) }
+    }
+
+    private func helpingStateURL(_ h: HelpedLibrary) -> URL { support.appendingPathComponent("helping-\(h.id).json") }
+
+    private func startAllHelping() { for h in helping where helpingRuns[h.id] == nil { runHelping(h) } }
+
+    private func runHelping(_ h: HelpedLibrary) {
+        let sync = BridgeSync(config: h.config, deviceID: bridgeDeviceID, deviceName: server.serviceName, role: .helper,
+                              progress: progress, markers: markers, library: library, stateURL: helpingStateURL(h))
+        let listener = BridgeListener(config: h.config, deviceID: bridgeDeviceID) { [weak self] in
+            Task { @MainActor in self?.kickHelping(after: 2) }
+        }
+        let hid = h.id
+        let loop = Task { [weak self] in
+            await sync.configure(inbox: self?.server.inbox, onEPUB: { file, voice in
+                Task { @MainActor in
+                    guard let self, let id = try? DocumentDigest.sha256Prefix(of: file) else { return }
+                    if let voice { UserDefaults.standard.set(voice, forKey: "habla.voice.\(id)") }
+                    if self.allBooks.contains(where: { $0.id == id }) {
+                        // Already here (yours: it stays visible and is never deleted; or theirs,
+                        // sent again): narrate this copy.
+                        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+                        self.narrate(id)
+                    } else {
+                        self.guestBooks[id] = hid                // hidden before it exists on disk
+                        self.importFiles([file], fromPhone: true)
+                    }
+                }
+            }, onJobDone: { id in
+                Task { @MainActor in
+                    guard let self, self.guestBooks[id] == hid else { return }
+                    self.delete(id)                              // delivered: nothing of theirs stays
+                }
+            })
+            listener.start()
+            while !Task.isCancelled {
+                await self?.helpRound(sync, id: hid)
+                try? await Task.sleep(nanoseconds: 6 * 3600 * 1_000_000_000)
+            }
+            listener.stop()
+        }
+        helpingRuns[h.id] = (sync, loop, listener)
+    }
+
+    /// One round for a helped library: check in with this Mac's speed, take EPUBs sent to it,
+    /// pick up books whose narrator went quiet, send finished ones, let collected ones go.
+    private func helpRound(_ sync: BridgeSync, id hid: String) async {
+        do {
+            await sync.setNarrator(narratorStatus)
+            try await sync.syncState()
+            try await sync.receiveEPUBs()
+            for id in try await sync.retarget() { narrate(id) }
+            try await sync.publishNewBooks()
+            try await sync.collect()
+            helpingJobs[hid] = await sync.jobs.count
+        } catch {
+            // Offline or a cap: the next round tries again.
+        }
+    }
+
+    /// The library changed (a guest book finished a chapter or the whole book): tell helped libraries.
+    func kickHelping(after seconds: Double = 5) {
+        guard !helpingRuns.isEmpty, helpingKick == nil else { return }
+        helpingKick = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard let self else { return }
+            self.helpingKick = nil
+            for (hid, run) in self.helpingRuns { await self.helpRound(run.sync, id: hid) }
+        }
+    }
+
+    /// Makes this Mac's own library on the bridge from someone's invite code (only when it has none).
+    public func startLibrary(invite code: String) async throws {
+        guard let invite = BridgeCode.parseInvite(code) else { throw HelpError.notALinkCode }
+        guard currentBridgeConfig == nil else { throw HelpError.already }
+        let key = BridgeKeys.newLibraryKey()
+        let keys = BridgeKeys(libraryKey: key)
+        try await BridgeClient(baseURL: invite.url, token: keys.token).enroll(tokenHash: keys.tokenHash, invite: invite.invite)
+        try? FileManager.default.createDirectory(at: bridgeFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        saveBridgeFile(BridgeFile(url: invite.url, libraryKey: key, enrollSecret: nil))
+        try? FileManager.default.removeItem(at: support.appendingPathComponent("bridge-state.json"))
+        startBridge()
+        objectWillChange.send()
+    }
+
+    /// A one-time code (7 days) for someone else's Mac to start its own library on this bridge.
+    public func makeInvite() async throws -> String {
+        guard let config = currentBridgeConfig else { throw HelpError.notALinkCode }
+        let invite = try await BridgeClient(baseURL: config.url, token: BridgeKeys(libraryKey: config.libraryKey).token).createInvite()
+        guard let code = BridgeCode.invite(.init(url: config.url, invite: invite)) else { throw HelpError.notALinkCode }
+        return code
+    }
+
+    private var currentBridgeConfig: BridgeConfig? {
+        guard let file = (try? Data(contentsOf: bridgeFileURL)).flatMap({ try? JSONDecoder().decode(BridgeFile.self, from: $0) }),
+              let key = file.libraryKey else { return nil }
+        return BridgeConfig(url: file.url, libraryKey: key)
+    }
+
+    /// An error message about a guest book, without its title.
+    nonisolated static func untitled(_ message: String, _ title: String) -> String {
+        message.replacingOccurrences(of: "“\(title)”", with: "it").replacingOccurrences(of: title, with: "it")
+    }
+
     /// Sentences per second this Mac voices (measured while narrating; a guess until then).
     static var narrationSpeed: Double? {
         get { UserDefaults.standard.object(forKey: "habla.narrationSpeed") as? Double }
@@ -300,7 +469,7 @@ public final class StudioStore: ObservableObject {
     /// What other devices need to decide where a new book is narrated fastest.
     var narratorStatus: NarratorStatus? {
         guard voiceEngine == .ready else { return nil }
-        let queued = queue.compactMap { id in books.first { $0.id == id } }.reduce(0) { sum, m in
+        let queued = queue.compactMap { id in allBooks.first { $0.id == id } }.reduce(0) { sum, m in
             let left = Set(m.chaptersToNarrate(voiceID: voice(for: m)).map(\.index))
             return sum + m.chapters.filter { left.contains($0.index) }.reduce(0) { $0 + $1.sentenceCount }
         }
@@ -425,7 +594,14 @@ public final class StudioStore: ObservableObject {
         serving = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
                                                         reason: "Sharing your library with your iPhone")
         server.onInbox = { [weak self] file in
-            Task { @MainActor in self?.importFiles([file], fromPhone: true) }
+            Task { @MainActor in
+                // Your iPhone added a book this Mac narrates for someone else: it's yours too now.
+                if let self, let id = try? DocumentDigest.sha256Prefix(of: file), self.guestBooks[id] != nil {
+                    self.guestBooks[id] = nil
+                    self.narrate(id)
+                }
+                self?.importFiles([file], fromPhone: true)
+            }
         }
         importInboxLeftovers()
         server.onDevice = { [weak self] _ in
@@ -441,6 +617,7 @@ public final class StudioStore: ObservableObject {
         startLibraryWatcher()
         resumeUnfinished()
         startBridge()
+        startAllHelping()
     }
 
     private func startServer() {
@@ -473,10 +650,11 @@ public final class StudioStore: ObservableObject {
     }
 
     public func reload() {
-        let before = books.map { "\($0.id):\($0.revision)" }
-        books = server.manifests()
+        allBooks = server.allManifests()
+        books = allBooks.filter { guestBooks[$0.id] == nil }
         for (id, _) in narratingElsewhere where books.first(where: { $0.id == id })?.isFullyRendered == true { narratingElsewhere[id] = nil }
-        if books.map({ "\($0.id):\($0.revision)" }) != before { kickBridge() }
+        let after = allBooks.map { "\($0.id):\($0.revision)" }
+        if after != lastLibraryStamp { lastLibraryStamp = after; kickBridge(); kickHelping() }
         if selection == nil || !books.contains(where: { $0.id == selection }) { selection = books.first?.id }
     }
 
@@ -497,6 +675,8 @@ public final class StudioStore: ObservableObject {
             }
         }
     }
+
+    private var lastLibraryStamp: [String] = []
 
     public var selected: BookManifest? { books.first { $0.id == selection } }
 
@@ -520,7 +700,7 @@ public final class StudioStore: ObservableObject {
         // One import at a time (two quick drops of the same file must not race).
         importChain = Task.detached(priority: .userInitiated) {
             await previous?.value
-            let known = await MainActor.run { Set(self.books.map(\.id)) }
+            let known = await MainActor.run { Set(self.allBooks.map(\.id)) }
             var added: [BookManifest] = [], duplicates: [String] = [], failures: [String] = []
             for url in epubs {
                 var imported = true
@@ -595,6 +775,7 @@ public final class StudioStore: ObservableObject {
             try? FileManager.default.removeItem(at: BookImporter.originalURL(for: id, in: library))
             progress.remove(id)
             var s = stopped; s.remove(id); stopped = s
+            if guestBooks[id] != nil { guestBooks[id] = nil }   // files gone: nothing left to hide
             deleting.remove(id)
             reload()
             pump()
@@ -632,7 +813,7 @@ public final class StudioStore: ObservableObject {
     public func narrate(_ id: String, unpause: Bool = true) {
         // No voice for this language (German, Russian, Ukrainian, French, Hindi): the book stays
         // text-only. Unknown ids are refused too, so nothing can reach the queue un-checked.
-        guard let m = books.first(where: { $0.id == id }), m.canNarrate else { return }
+        guard let m = allBooks.first(where: { $0.id == id }), m.canNarrate else { return }
         var s = stopped; s.remove(id); stopped = s
         if !queue.contains(id) { queue.append(id) }
         if unpause { paused = false }
@@ -664,7 +845,7 @@ public final class StudioStore: ObservableObject {
         let skip = stopped
         // Only languages with a voice may be narrated: a French/Hindi/German book narrated in an
         // earlier version must keep playing its existing audio, never be re-narrated in English.
-        for m in books where m.canNarrate && m.voice != nil && !m.chaptersToNarrate(voiceID: voice(for: m)).isEmpty
+        for m in allBooks where m.canNarrate && m.voice != nil && !m.chaptersToNarrate(voiceID: voice(for: m)).isEmpty
                                 && !queue.contains(m.id) && !skip.contains(m.id) {
             queue.append(m.id)
         }
@@ -674,7 +855,7 @@ public final class StudioStore: ObservableObject {
     private func pump() {
         guard renderTask == nil, !paused, let id = queue.first else { return }
         guard voiceEngine == .ready else { return }
-        guard let m = books.first(where: { $0.id == id }), !deleting.contains(id) else { queue.removeFirst(); pump(); return }
+        guard let m = allBooks.first(where: { $0.id == id }), !deleting.contains(id) else { queue.removeFirst(); pump(); return }
         let engine = self.engine ?? makeEngine()
         self.engine = engine
         let pipeline = RenderPipeline(engine: engine, cacheDirectory: support.appendingPathComponent("SentenceCache"))
@@ -713,7 +894,7 @@ public final class StudioStore: ObservableObject {
                             secondsLeft: avg.map { $0 * Double(max(0, total - done)) })
                         if p.sentence == p.sentenceCount {   // chapter finished → visible to the iPhone now
                             self.reload()
-                            if let fresh = self.books.first(where: { $0.id == id }) {
+                            if let fresh = self.allBooks.first(where: { $0.id == id }) {
                                 let left = Set(fresh.chaptersToNarrate(voiceID: voice.voiceID).map(\.index))
                                 done = narratable.filter { !left.contains($0.index) }.reduce(0) { $0 + $1.sentenceCount }
                             }
@@ -736,8 +917,9 @@ public final class StudioStore: ObservableObject {
                 self.renderTask = nil
                 self.render = nil
                 self.reload()
-                let finished = self.books.first { $0.id == id }.map { $0.chaptersToNarrate(voiceID: voice.voiceID).isEmpty } ?? true
-                if let failure {
+                let finished = self.allBooks.first { $0.id == id }.map { $0.chaptersToNarrate(voiceID: voice.voiceID).isEmpty } ?? true
+                if var failure {
+                    if self.guestBooks[id] != nil { failure = "A book you're narrating for someone else: " + StudioStore.untitled(failure, m.title) }
                     self.alert = finished ? failure : "Narration stopped: \(failure)"
                     if !finished { self.paused = true; return }
                 }
@@ -930,7 +1112,7 @@ public final class StudioStore: ObservableObject {
             let signature = books.map { "\($0.id)" }.sorted().joined(separator: ",") + "@\(device.host)"
             if signature != lastPushSignature {
                 xteink = .working("Checking \(name)…")
-                let result = try await sync.pushBooks(from: library) { title in
+                let result = try await sync.pushBooks(from: library, only: Set(books.map(\.id))) { title in
                     Task { @MainActor in self.xteink = .working("Sending “\(title)”…") }
                 }
                 xteinkLastSync = Date()
@@ -959,5 +1141,14 @@ public final class StudioStore: ObservableObject {
         self.render = render; self.queue = queue; self.phoneLastSeen = phoneLastSeen
         self.xteink = xteink; self.serverAddress = server
     }
+}
+
+/// Ids of guest books, readable from the server's queue and the bridge actor.
+final class HiddenIDs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: Set<String> = []
+    func set(_ new: Set<String>) { lock.withLock { ids = new } }
+    func contains(_ id: String) -> Bool { lock.withLock { ids.contains(id) } }
+    var all: Set<String> { lock.withLock { ids } }
 }
 #endif

@@ -35,6 +35,7 @@ CLASS_A_CAP = "400000"             # per month (free: 1 M for the account)
 CLASS_B_CAP = "4000000"            # per month (free: 10 M)
 REQUESTS_CAP_DAY = "20000"         # per day (free: 100 k Worker requests, 100 k D1 writes)
 TRANSIT_TTL_DAYS = "14"
+MAX_SPACES = "8"                   # libraries on the bridge (yours + people you help)
 MAX_STATE_BYTES = "1048576"
 MAX_TRANSIT_BYTES = "16777216"
 

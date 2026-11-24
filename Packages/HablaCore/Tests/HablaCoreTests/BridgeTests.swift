@@ -288,5 +288,33 @@ final class BridgeTests: XCTestCase {
         let received = try await helper.receiveBooks()
         XCTAssertEqual(received, [], "a helper never takes finished books")
     }
+
+    /// A book narrated here for someone else's library never reaches this Mac's own devices:
+    /// not through its own bridge, not over Wi-Fi.
+    func testGuestBookNeverReachesOwnDevices() async throws {
+        let (macLib, m) = try await makeLibrary()
+        let phoneLib = Fixtures.tempDir().appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: phoneLib, withIntermediateDirectories: true)
+        let (mac, _, _) = device("mac-1", .mac, library: macLib)
+        let (phone, _, _) = device("iphone-1", .phone, library: phoneLib)
+        await mac.configure(hidden: { [m.id] })
+        try await phone.syncState(); try await mac.syncState()
+        let sent = try await mac.publishNewBooks()
+        XCTAssertEqual(sent, [], "never sent to its own phone")
+        XCTAssertTrue(FakeBridge.names("transit").isEmpty)
+        try await phone.syncState()
+        let received = try await phone.receiveBooks()
+        XCTAssertEqual(received, [])
+        let held = await phone.booksOnMac()
+        XCTAssertFalse(held.contains(m.id), "not even listed as held")
+
+        let server = LibraryServer(library: macLib, progress: ProgressStore(fileURL: macLib.appendingPathComponent(".p.json")))
+        server.isHidden = { $0 == m.id }
+        func get(_ path: String) -> Int { server.route(HTTPRequest(method: "GET", path: path, headers: [:], body: Data())).status }
+        XCTAssertTrue(server.manifests().isEmpty)
+        XCTAssertEqual(server.allManifests().map(\.id), [m.id], "the app itself still narrates it")
+        XCTAssertEqual(get("/v1/books/\(m.id)/manifest"), 404)
+        XCTAssertEqual(get("/v1/books/\(m.id)/files/\(m.files[0].path)"), 404)
+    }
 }
 

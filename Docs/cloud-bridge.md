@@ -70,7 +70,7 @@ paired, certificate-pinned LAN connection (in the pairing answer, and via
   documents to a multiple of 4 KiB, book chunks to a multiple of 64 KiB) so sizes leak little.
 - The Worker stores only `SHA-256(token)` as the space id. Enrolling a space needs the
   `ENROLL_SECRET` Worker secret, which only the Mac has (it enrolls once, then forgets the
-  secret).
+  secret), or a one-time invite made by an enrolled library (see below).
 
 ## Worker API
 
@@ -80,6 +80,8 @@ Responses are JSON unless a body is returned.
 | Method & path | Purpose |
 |---|---|
 | `POST /v1/spaces` | Enroll. Header `X-Habla-Enroll: <ENROLL_SECRET>`, body `{"tokenHash":"<sha256 hex>"}`. `201` new, `200` exists. |
+| `POST /v1/spaces` (invite) | Header `X-Habla-Invite: <invite>` instead of the secret: someone else's library. The invite is consumed atomically; `403` if used, expired, or `MAX_SPACES` libraries already exist (`cap: "spaces"`). |
+| `POST /v1/invites` | `201 {invite, expires}`: a one-time invite (7 days, only its SHA-256 stored). At most 3 open per library (`429`). |
 | `GET /v1/usage` | `{storageBytes, portfolioBytes, storageCapBytes, classA, classACap, classB, classBCap, requestsToday, requestsCapDay}` |
 | `GET /v1/state` | `[{name, size, etag, updated}]` of this space's state objects (from the D1 ledger, no R2 list) |
 | `GET /v1/state/{name}` | body (`If-None-Match` → `304`) |
@@ -175,3 +177,22 @@ iPhone only the books it narrated itself; nobody re-sends a book it received.
   and once every 6 hours as a safety net. Documents are downloaded only if they changed, and
   its own is uploaded only if it changed.
 - Only documents whose `etag` changed are downloaded.
+
+## Helping someone else's library
+
+Someone with their own Mac and iPhone can have their books narrated by your Mac, without
+either library seeing the other's books.
+
+1. Your Mac: Link another Mac… → Create invite code. They paste it in “Join another Mac's
+   library…”: their Mac makes its own library key, enrolls with the invite (once, 7 days),
+   and now has its own link code. Their iPhone gets their key from their Mac as usual.
+2. Your Mac: paste their link code under “Help someone else”. It is saved in
+   `Security/helping.json` (0600). Your Mac runs one extra `BridgeSync` per helped library with
+   role `helper` (own state file `helping-<id>.json`, own listener), so it can be chosen to
+   narrate there.
+3. Books it narrates for them are **guest books**: in the same Library folder (one narration
+   queue), but hidden from your shelf, your LAN server (catalog and every by-id route answer
+   404), your own bridge (never published, never in `has`) and the Xteink. Once their devices
+   collect a book, it is deleted here. If you add the same book yourself, it becomes yours.
+
+Every library shares the account's free-tier caps; `MAX_SPACES` (8) bounds how many exist.

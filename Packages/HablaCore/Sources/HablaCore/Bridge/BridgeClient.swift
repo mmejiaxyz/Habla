@@ -28,6 +28,35 @@ public struct BridgeConfig: Codable, Equatable, Sendable {
     public init(url: URL, libraryKey: Data) { self.url = url; self.libraryKey = libraryKey }
 }
 
+/// The codes people paste between Macs. A link code joins a library (it holds the key: a
+/// password). An invite code lets someone else's Mac start its own library on the same bridge.
+public enum BridgeCode {
+    public struct Invite: Codable, Equatable, Sendable {
+        public var url: URL; public var invite: String
+        public init(url: URL, invite: String) { self.url = url; self.invite = invite }
+    }
+
+    public static func link(_ c: BridgeConfig) -> String? {
+        (try? JSONEncoder().encode(c)).map { "habla-link:" + $0.base64EncodedString() }
+    }
+    public static func parseLink(_ code: String) -> BridgeConfig? {
+        guard let c: BridgeConfig = decode(code, prefix: "habla-link:"), c.libraryKey.count == 32, c.url.scheme == "https" else { return nil }
+        return c
+    }
+    public static func invite(_ i: Invite) -> String? {
+        (try? JSONEncoder().encode(i)).map { "habla-invite:" + $0.base64EncodedString() }
+    }
+    public static func parseInvite(_ code: String) -> Invite? {
+        guard let i: Invite = decode(code, prefix: "habla-invite:"), i.url.scheme == "https", !i.invite.isEmpty else { return nil }
+        return i
+    }
+    static func decode<T: Decodable>(_ code: String, prefix: String) -> T? {
+        let raw = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard raw.hasPrefix(prefix), let d = Data(base64Encoded: String(raw.dropFirst(prefix.count))) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: d)
+    }
+}
+
 /// One object as the Worker lists it.
 public struct BridgeObject: Codable, Equatable, Sendable {
     public var name: String
@@ -67,6 +96,24 @@ public struct BridgeClient: Sendable {
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.httpBody = try JSONEncoder().encode(["tokenHash": tokenHash])
         _ = try await perform(r)
+    }
+
+    /// Registers someone else's library with a one-time invite from an enrolled one.
+    public func enroll(tokenHash: String, invite: String) async throws {
+        var r = request("v1/spaces", method: "POST", auth: false)
+        r.setValue(invite, forHTTPHeaderField: "X-Habla-Invite")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONEncoder().encode(["tokenHash": tokenHash])
+        _ = try await perform(r)
+    }
+
+    /// A one-time invite (7 days) that lets someone else's Mac start its own library here.
+    public func createInvite() async throws -> String {
+        let (data, _) = try await perform(request("v1/invites", method: "POST"))
+        guard let invite = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["invite"] as? String else {
+            throw BridgeError.http(500)
+        }
+        return invite
     }
 
     public func usage() async throws -> BridgeUsage {

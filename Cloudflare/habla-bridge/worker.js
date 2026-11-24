@@ -3,6 +3,7 @@
 // keeps the account inside Cloudflare's free tier, and moves bytes.
 
 const NAME = /^[0-9a-f]{40}$/;
+const INVITE_DAYS = 7;
 const enc = new TextEncoder();
 
 const json = (body, status = 200, headers = {}) =>
@@ -161,11 +162,23 @@ async function handle(request, env) {
   if (parts[0] !== 'v1') return fail(404, 'not found');
 
   if (parts[1] === 'spaces' && parts.length === 2 && request.method === 'POST') {
-    if (!env.ENROLL_SECRET) return fail(503, 'enrollment not configured');
-    if (!sameSecret(request.headers.get('x-habla-enroll') ?? '', env.ENROLL_SECRET)) return fail(403, 'forbidden');
+    const invite = request.headers.get('x-habla-invite');
+    if (invite == null) {
+      if (!env.ENROLL_SECRET) return fail(503, 'enrollment not configured');
+      if (!sameSecret(request.headers.get('x-habla-enroll') ?? '', env.ENROLL_SECRET)) return fail(403, 'forbidden');
+    }
     let body;
     try { body = await request.json(); } catch { return fail(400, 'bad json'); }
     if (!/^[0-9a-f]{64}$/.test(body?.tokenHash ?? '')) return fail(400, 'bad token hash');
+    if (invite != null) {
+      // Someone else's library, invited by an enrolled one: the invite works once, and the
+      // number of libraries is capped (they all share the account's free tier).
+      const spaces = await env.DB.prepare('SELECT COUNT(*) AS n FROM spaces').first();
+      if ((spaces?.n ?? 0) >= num(env, 'MAX_SPACES')) return fail(403, 'no room for another library', 'spaces');
+      const used = await env.DB.prepare('DELETE FROM invites WHERE hash = ?1 AND expires > ?2 RETURNING space')
+        .bind(await sha256hex(invite), Date.now()).first();
+      if (!used) return fail(403, 'invite used or expired');
+    }
     const r = await env.DB.prepare('INSERT OR IGNORE INTO spaces (id, created) VALUES (?1, ?2)').bind(body.tokenHash, Date.now()).run();
     return json({ ok: true }, r.meta?.changes ? 201 : 200);
   }
@@ -176,6 +189,16 @@ async function handle(request, env) {
   if (!(await env.DB.prepare('SELECT 1 AS ok FROM spaces WHERE id = ?1').bind(space).first())) return fail(401, 'unauthorized');
 
   if (parts[1] === 'usage' && parts.length === 2 && request.method === 'GET') return json(await usage(env));
+  if (parts[1] === 'invites' && parts.length === 2 && request.method === 'POST') {
+    const now = Date.now();
+    const open = await env.DB.prepare('SELECT COUNT(*) AS n FROM invites WHERE space = ?1 AND expires > ?2').bind(space, now).first();
+    if ((open?.n ?? 0) >= 3) return fail(429, 'too many open invites', 'invites');
+    const invite = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const expires = now + INVITE_DAYS * 86400000;
+    await env.DB.prepare('INSERT INTO invites (hash, space, expires) VALUES (?1, ?2, ?3)').bind(await sha256hex(invite), space, expires).run();
+    return json({ invite, expires }, 201);
+  }
   if (parts[1] === 'listen' && parts.length === 2) {
     const device = request.headers.get('x-habla-device') ?? '';
     if (!NAME.test(device)) return fail(400, 'bad device');
@@ -221,6 +244,8 @@ async function scheduled(env) {
   const expired = (await env.DB.prepare(`SELECT space, kind, name FROM objects WHERE kind = 'transit' AND updated < ?1`)
     .bind(cutoff).all()).results;
   for (const o of expired) await remove(env, o.space, o.kind, o.name);
+
+  await env.DB.prepare('DELETE FROM invites WHERE expires <= ?1').bind(Date.now()).run();
 
   const stored = await listAll(env, env.BRIDGE);
   if (stored) {
