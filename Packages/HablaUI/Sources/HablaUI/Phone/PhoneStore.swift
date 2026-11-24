@@ -37,6 +37,11 @@ public final class PhoneStore: ObservableObject {
     @Published public private(set) var bridgeSynced: Date?
     private var bridgeSync: BridgeSync?
     private var bridgeRan: Date?
+    /// One bridge sync at a time; a forced one asked for meanwhile runs right after.
+    private var bridgeSyncing = false
+    private var bridgeAgain = false
+    /// Books being routed now (so two syncs never send the same book twice).
+    private var routing: Set<String> = []
     var remote: [LibraryEntry] = []
     var downloading: [String: Double] = [:]
     /// Books being refreshed in the background (new chapters): they stay fully usable.
@@ -273,9 +278,10 @@ public final class PhoneStore: ObservableObject {
             ?? VoiceInfo(engine: "paradee", voiceID: BookLanguage.closestVoice(to: accountVoice, for: m.language))
         let pending = Set(m.chapters.filter { $0.audioStatus == .pending }.map(\.index))
         #if canImport(UIKit)
-        // A little extra time to finish the sentence if Habla goes to the background.
-        let background = UIApplication.shared.beginBackgroundTask(withName: "Narrating") {}
-        defer { UIApplication.shared.endBackgroundTask(background) }
+        // A little extra time if Habla goes to the background; when it runs out iOS pauses
+        // Habla and narration carries on when it's back.
+        let background = BackgroundTime("Narrating")
+        defer { background.end() }
         #endif
         let started = Date()
         let voiced = SentenceCounter()
@@ -352,8 +358,10 @@ public final class PhoneStore: ObservableObject {
     /// Sends a new book to whichever running device would finish narrating it first: the paired
     /// Mac over Wi-Fi, the other Mac through the bridge, or this iPhone when no Mac is running.
     func route(_ id: String) async {
-        guard let bridge, let m = manifest(id), let mac = paired else { return }
-        guard BookLanguage.hasVoice(m.language) else { return }          // read-only languages: the Mac just needs the text
+        guard let bridge, let m = manifest(id), let mac = paired, !routing.contains(id) else { return }
+        guard BookLanguage.hasVoice(m.language) else { return }
+        routing.insert(id)
+        defer { routing.remove(id) }          // read-only languages: the Mac just needs the text
         let sentences = m.chapters.filter { $0.audioStatus == .pending }.reduce(0) { $0 + $1.sentenceCount }
         await bridge.setNarrator(narratorStatus)
         guard let target = await bridge.chooseNarrator(sentences: sentences) else { return }   // nobody: keep the outbox
@@ -382,12 +390,12 @@ public final class PhoneStore: ObservableObject {
     public func bookClosed() {
         guard bridge != nil else { return }
         #if canImport(UIKit)
-        let task = UIApplication.shared.beginBackgroundTask(withName: "Saving your place") {}
+        let time = BackgroundTime("Saving your place")
         #endif
         Task {
             await syncBridge(atHome: client != nil, force: true)
             #if canImport(UIKit)
-            UIApplication.shared.endBackgroundTask(task)
+            time.end()
             #endif
         }
     }
@@ -408,8 +416,14 @@ public final class PhoneStore: ObservableObject {
     /// At home only places and markers are mirrored (books come over Wi-Fi, faster).
     func syncBridge(atHome: Bool, force: Bool = false) async {
         guard let bridge else { return }
+        if bridgeSyncing { if force { bridgeAgain = true }; return }
         if !force, let last = bridgeRan, Date().timeIntervalSince(last) < 300 { return }
+        bridgeSyncing = true
         bridgeRan = Date()
+        defer {
+            bridgeSyncing = false
+            if bridgeAgain { bridgeAgain = false; Task { await syncBridge(atHome: client != nil, force: true) } }
+        }
         do {
             await bridge.setNarrator(narratorStatus)
             try await bridge.syncState()
@@ -769,3 +783,21 @@ final class SentenceCounter: @unchecked Sendable {
     func add() { lock.withLock { n += 1 } }
     var count: Int { lock.withLock { n } }
 }
+
+#if canImport(UIKit)
+/// Extra time to finish work in the background. Handed back the moment iOS says it's up:
+/// keeping it past that makes iOS end Habla (handed back, Habla is only paused).
+@MainActor final class BackgroundTime {
+    private var id: UIBackgroundTaskIdentifier = .invalid
+    init(_ name: String) {
+        id = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            MainActor.assumeIsolated { self?.end() }
+        }
+    }
+    func end() {
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
+    }
+}
+#endif
