@@ -40,6 +40,10 @@ public final class LibraryServer: @unchecked Sendable {
     /// Books narrated here for someone else's library: never listed, served or synced to this
     /// Mac's own devices (they don't exist as far as the server is concerned).
     public var isHidden: (@Sendable (String) -> Bool)?
+    /// The account (one library on every device): its devices get in with the account's Wi-Fi
+    /// token, and the hello proves to them that this Mac holds the account key. Set before
+    /// `start` (the Bonjour record carries the account tag); restart the server when it changes.
+    public let account = Locked<BridgeKeys?>(nil)
     /// Largest EPUB accepted from the iPhone.
     static let maxUpload = 200 * 1024 * 1024
 
@@ -85,6 +89,7 @@ public final class LibraryServer: @unchecked Sendable {
             txt["v"] = "2"
             if let libraryID { txt["id"] = libraryID }
             if tlsIdentity != nil { txt["tls"] = "1" }
+            if let keys = account.value { txt["acct"] = keys.accountTag }
             listener.service = NWListener.Service(name: serviceName, type: SyncProtocol.bonjourType, domain: nil, txtRecord: txt)
         }
         listener.newConnectionHandler = { [weak self] conn in self?.handle(conn) }
@@ -206,13 +211,22 @@ public final class LibraryServer: @unchecked Sendable {
 
         // Public: who this is (to tell Macs apart) and the pairing call itself.
         if parts == ["v1"], r.method == "GET" {
-            return .json(ServerHello(name: serviceName, version: String(SyncProtocol.version), libraryID: libraryID,
-                                     pairing: registry != nil, inbox: "1"))
+            var hello = ServerHello(name: serviceName, version: String(SyncProtocol.version), libraryID: libraryID,
+                                    pairing: registry != nil, inbox: "1")
+            if let keys = account.value, let fp = tlsFingerprint, let nonce = r.headers["x-habla-nonce"], (16...128).contains(nonce.count) {
+                hello.accountProof = keys.lanProof(fingerprint: fp, nonce: nonce)
+            }
+            return .json(hello)
         }
         if parts == ["v1", "pair"], r.method == "POST" { return pair(r) }
 
         let token = r.headers[SyncProtocol.tokenHeader.lowercased()]
-        if let registry {
+        if let keys = account.value, let token, Self.constantTimeEqual(token, keys.lanToken) {
+            // One of the account's devices.
+            let id = String((r.headers["x-habla-device"] ?? "device").prefix(64))
+            let name = String((r.headers["x-habla-device-name"]?.removingPercentEncoding ?? "Device").prefix(60))
+            onDevice?(PairedDevice(id: id, name: name, tokenHash: "", pairedAt: Date(), lastSeen: Date()))
+        } else if let registry {
             guard let device = registry.device(forToken: token) else { return .text(401, "Not paired") }
             onDevice?(device)
         } else if let accessToken, token != accessToken {
@@ -266,6 +280,12 @@ public final class LibraryServer: @unchecked Sendable {
         default:
             return .text(404, "Not found")
         }
+    }
+
+    static func constantTimeEqual(_ a: String, _ b: String) -> Bool {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        guard x.count == y.count else { return false }
+        return zip(x, y).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0
     }
 
     /// The books this library shows its devices (hidden guest books left out).

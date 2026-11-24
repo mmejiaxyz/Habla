@@ -85,7 +85,8 @@ public struct PhoneRoot: View {
         .onOpenURL { url in
             if url.isFileURL { store.importBooks([url]) }
             // The QR code in Habla Studio, scanned with the Camera.
-            else if let invite = PairingInvite(url: url) { path = []; tab = .mac; Task { await store.pair(invite: invite) } }
+            else if url.host == "account" { path = []; tab = .mac; store.joinAccount(url.absoluteString) }
+            else if url.host == "pair" { path = []; tab = .mac; store.error = "That’s an old pairing code. Update Habla on your Mac and scan its account QR code." }
         }
         .onChange(of: phase) { _, p in
             switch p {

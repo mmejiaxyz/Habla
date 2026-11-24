@@ -135,10 +135,6 @@ let readerPageHeight = phone.height - deviceInsets.top - deviceInsets.bottom - 7
     render("m2-studio-narrating", StudioWindowView(store: studio, installScript: nil, openReader: { _ in }), size: mac, scale: 2)
     let emptyStudio = StudioStore(support: makeRoot("studio-empty", books: []))
     emptyStudio.previewState(render: nil, queue: [], phoneLastSeen: nil, xteink: .looking, server: "192.168.1.20:8787")
-    let invite = PairingInvite(libraryID: "3e85", name: "Habla on Manuel’s MacBook Pro", address: "192.168.1.20:8787",
-                               fingerprint: String(repeating: "ab", count: 32), code: "7KQ2M-XW4HD")
-    render("m5-pairing", PairingSheet(pairing: .init(code: invite.code, expires: Date().addingTimeInterval(583), invite: invite.url),
-                                      macName: "Habla on Manuel’s MacBook Pro", encrypted: true, done: {}), size: CGSize(width: 680, height: 420), scale: 2)
     render("m3-studio-empty", StudioWindowView(store: emptyStudio, installScript: URL(fileURLWithPath: "/tmp/install.sh"), openReader: { _ in }), size: mac, scale: 2)
 
     let spread = ReaderModel(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: 14, style: ReaderStyle(), columns: 2)

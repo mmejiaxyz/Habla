@@ -28,6 +28,35 @@ public struct BridgeConfig: Codable, Equatable, Sendable {
     public init(url: URL, libraryKey: Data) { self.url = url; self.libraryKey = libraryKey }
 }
 
+/// An account: one library on every device. Its QR code (and the same text to paste on a Mac)
+/// is a `habla://account` link holding the bridge URL, the library key and the name. Whoever
+/// has it is one of your devices: it works like a password.
+public enum AccountCode {
+    public static func url(_ c: BridgeConfig, name: String?) -> URL {
+        var u = URLComponents()
+        u.scheme = "habla"; u.host = "account"
+        let key = c.libraryKey.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        u.queryItems = [URLQueryItem(name: "u", value: c.url.absoluteString), URLQueryItem(name: "k", value: key)]
+            + ((name?.isEmpty == false) ? [URLQueryItem(name: "n", value: name)] : [])
+        return u.url!
+    }
+
+    /// Reads an account link, or an older `habla-link:` code.
+    public static func parse(_ text: String) -> (config: BridgeConfig, name: String?)? {
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let c = BridgeCode.parseLink(raw) { return (c, nil) }
+        guard let comps = URLComponents(string: raw), comps.scheme == "habla", comps.host == "account",
+              let items = comps.queryItems else { return nil }
+        func v(_ k: String) -> String? { items.first { $0.name == k }?.value }
+        guard let u = v("u").flatMap(URL.init(string:)), u.scheme == "https", var k = v("k") else { return nil }
+        k = k.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while k.count % 4 != 0 { k += "=" }
+        guard let key = Data(base64Encoded: k), key.count == 32 else { return nil }
+        return (BridgeConfig(url: u, libraryKey: key), v("n").map { String($0.prefix(60)) })
+    }
+}
+
 /// The codes people paste between Macs. A link code joins a library (it holds the key: a
 /// password). An invite code lets someone else's Mac start its own library on the same bridge.
 public enum BridgeCode {

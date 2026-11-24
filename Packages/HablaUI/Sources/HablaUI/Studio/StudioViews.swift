@@ -17,7 +17,6 @@ public struct StudioWindowView: View {
     @State var showingBook = false
     /// Redesign: sidebar "Narrating" filter.
     @State var narratingOnly = false
-    @State private var confirmForget: PairedDevice?
     @State private var showLinkMac = false
 
     public init(store: StudioStore, updater: StudioUpdater = StudioUpdater(), installScript: URL?, openReader: @escaping (String) -> Void) {
@@ -49,8 +48,9 @@ public struct StudioWindowView: View {
             Button("OK") { store.alert = nil }
         } message: { Text(store.alert ?? "") }
         .confirmationDialog("Delete “\(confirmDelete?.title ?? "")”?", isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } })) {
-            Button("Delete book and narration", role: .destructive) { if let m = confirmDelete { store.delete(m.id) }; confirmDelete = nil }
-        } message: { Text(Features.xteink ? "Copies already on your iPhone or Xteink stay there." : "A copy already on your iPhone stays there.") }
+            Button("Delete from all devices", role: .destructive) { if let m = confirmDelete { store.delete(m.id, everywhere: true) }; confirmDelete = nil }
+        } message: { Text(store.bridgeReady ? "The book and its narration go from this Mac and every device in your account."
+                                            : "The book and its narration go from this Mac.") }
     }
 
     func moveSelection(_ step: Int) {
@@ -149,28 +149,25 @@ public struct StudioWindowView: View {
 
     var devices: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if store.devices.isEmpty {
-                deviceRow(on: false, name: "No iPhone yet",
-                          detail: !store.onWiFi ? "This Mac isn't on Wi-Fi" : "Pair your iPhone to share books and your place.")
-            }
-            ForEach(store.devices) { d in
-                let recent = d.lastSeen.map { Date().timeIntervalSince($0) < 600 } ?? false
-                deviceRow(on: recent, name: d.name, detail: d.lastSeen.map { "Synced \(Format.ago($0))" } ?? "Paired")
-                    .contextMenu { Button("Forget “\(d.name)”…", role: .destructive) { confirmForget = d } }
-            }
-            if !store.helperOnly {
-                Button { store.startPairing() } label: {
-                    Text(store.devices.isEmpty ? "Pair iPhone…" : "Pair another device…")
-                        .font(Theme.grotesk(13)).foregroundStyle(Theme.accentText)
-                        .padding(.horizontal, 24).padding(.vertical, 8)
-                        .contentShape(Rectangle())
-                }.buttonStyle(.plain)
+            if !store.bridgeReady {
+                deviceRow(on: false, name: "No account yet",
+                          detail: "Join your account to share your library with your iPhone and your other Macs.")
+            } else {
+                deviceRow(on: true, name: store.accountName ?? "Your account", detail: "This Mac · \(store.books.count) book\(store.books.count == 1 ? "" : "s")")
+                if store.accountDevices.isEmpty {
+                    deviceRow(on: false, name: "No other devices yet", detail: "Scan the account’s QR code with your iPhone’s Camera.")
+                }
+                ForEach(store.accountDevices) { d in
+                    let recent = d.online || Date().timeIntervalSince(d.lastSeen) < 600
+                    let what = d.kind == .helper ? "Helps narrate" : "\(d.books) book\(d.books == 1 ? "" : "s")"
+                    deviceRow(on: recent, name: d.name, detail: "\(what) · synced \(Format.ago(d.lastSeen))")
+                }
             }
             ForEach(store.helping) { h in
                 deviceRow(on: true, name: "Narrating for \(h.name)", detail: "Their books stay hidden from you and your devices")
             }
             Button { showLinkMac = true } label: {
-                Text(store.bridgeReady ? "Link another Mac…" : "Join another Mac’s library…")
+                Text(store.bridgeReady ? "Account…" : "Join your account…")
                     .font(Theme.grotesk(13)).foregroundStyle(Theme.accentText)
                     .padding(.horizontal, 24).padding(.vertical, 8)
                     .contentShape(Rectangle())
@@ -181,12 +178,6 @@ public struct StudioWindowView: View {
             }
         }
         .sheet(isPresented: $showLinkMac) { LinkMacSheet(store: store) { showLinkMac = false } }
-        .sheet(isPresented: Binding(get: { store.pairingCode != nil }, set: { if !$0 { store.stopPairing() } })) {
-            if let p = store.pairingCode { PairingSheet(pairing: p, macName: store.serverName, encrypted: store.encrypted) { store.stopPairing() } }
-        }
-        .confirmationDialog("Forget “\(confirmForget?.name ?? "")”?", isPresented: Binding(get: { confirmForget != nil }, set: { if !$0 { confirmForget = nil } })) {
-            Button("Forget", role: .destructive) { if let d = confirmForget { store.forget(d) }; confirmForget = nil }
-        } message: { Text("It won't be able to sync with this Mac until you pair it again. Its downloaded books stay on it.") }
     }
 
     var xteinkRow: some View {
@@ -503,7 +494,6 @@ public struct StudioReaderWindow: View {
     }
 }
 
-/// "Pair your iPhone": a QR code for the iPhone camera, and the same code to type.
 /// Links a second Mac to this library's cloud bridge: both then narrate, sync places and
 /// marks, and new books go to whichever running Mac finishes them first. Also where this Mac
 /// helps someone else's library (invite them, then paste their link code), and where a Mac
@@ -520,21 +510,34 @@ struct LinkMacSheet: View {
     @State private var helpName = ""
     @State private var helpCode = ""
     @State private var helpFailed: String?
+    @State private var name = ""
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Link another Mac").font(Theme.grotesk(17)).fontWeight(.semibold)
-                if let code = store.bridgeLinkCode {
-                    note("On your other Mac, open Habla, choose “Join another Mac’s library…”, and paste this code. It works like a password: only paste it on your own Macs, or on the Mac of someone helping you narrate.")
-                    Button(copied ? "Copied" : "Copy link code") { copy(code); copied = true }
+                Text(store.bridgeReady ? "Account" : "Join your account").font(Theme.grotesk(17)).fontWeight(.semibold)
+                if let link = store.accountLink {
+                    HStack(alignment: .top, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            TextField("Account name", text: $name).textFieldStyle(.roundedBorder)
+                                .onSubmit { store.renameAccount(name) }
+                            Button("Rename") { store.renameAccount(name) }
+                                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || name == store.accountName)
+                            note("Every device in this account has the whole library: books, narration, your place and underlines. Deleting a book deletes it everywhere.")
+                            note("iPhone: scan this code with the Camera and tap the Habla link. Another Mac: copy the code and paste it there. It works like a password: only use it on your own devices.")
+                            Button(copied ? "Copied" : "Copy account code") { copy(link.absoluteString); copied = true }
+                        }
+                        QRCode(text: link.absoluteString)
+                            .frame(width: 150, height: 150).padding(10)
+                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white))
+                    }
                     Divider()
                     helpSomeone
                     Divider()
                 }
-                note(store.bridgeReady ? "Or move this Mac into another of your libraries by pasting its link code:"
-                                       : "Paste the link code of your other Mac, or an invite code someone sent you to start your own library:")
-                TextField(store.bridgeReady ? "habla-link:…" : "habla-link:… or habla-invite:…", text: $pasted).textFieldStyle(.roundedBorder)
+                note(store.bridgeReady ? "Or move this Mac into another account by pasting its code:"
+                                       : "Paste your account’s code (copied on another Mac or iPhone), or an invite code someone sent you to start your own account:")
+                TextField(store.bridgeReady ? "habla://account…" : "habla://account… or habla-invite:…", text: $pasted).textFieldStyle(.roundedBorder)
                 Toggle("Help narrate only", isOn: $store.helperOnly)
                 Text("This Mac narrates books for your devices without showing them, syncing your places or marks, or keeping them afterwards.")
                     .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
@@ -548,23 +551,24 @@ struct LinkMacSheet: View {
             }
             .padding(22)
         }
-        .frame(width: 460).frame(minHeight: 360, idealHeight: store.bridgeReady ? 640 : 360)
+        .frame(width: 520).frame(minHeight: 360, idealHeight: store.bridgeReady ? 720 : 360)
+        .onAppear { name = store.accountName ?? "" }
     }
 
     /// Someone with their own Mac and iPhone: invite them, then narrate for them.
     var helpSomeone: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Help someone else").font(Theme.grotesk(15)).fontWeight(.semibold)
-            note("1. Send an invite code to someone with their own Mac. They paste it in “Join another Mac’s library…”. It works once, for 7 days.")
+            note("1. Send an invite code to someone with their own Mac. They paste it in “Join your account…” to start their own account. It works once, for 7 days.")
             if let invite {
                 Button(inviteCopied ? "Copied" : "Copy invite code") { copy(invite); inviteCopied = true }
             } else {
                 Button(working ? "Creating…" : "Create invite code") { makeInvite() }.disabled(working)
             }
-            note("2. Paste the link code their Mac shows under “Link another Mac…”. This Mac then narrates their books in the background: you never see them, and they never reach your iPhone or your other Macs.")
+            note("2. Paste the account code their Mac shows under “Account…”. This Mac then narrates their books in the background: you never see them, and they never reach your iPhone or your other Macs.")
             HStack {
                 TextField("Their name", text: $helpName).textFieldStyle(.roundedBorder).frame(width: 120)
-                TextField("habla-link:…", text: $helpCode).textFieldStyle(.roundedBorder)
+                TextField("habla://account…", text: $helpCode).textFieldStyle(.roundedBorder)
                 Button("Help") { help() }.disabled(helpCode.isEmpty)
             }
             if let helpFailed { Text(helpFailed).font(Theme.grotesk(12)).foregroundStyle(.red) }
@@ -597,7 +601,7 @@ struct LinkMacSheet: View {
             }
             return
         }
-        if store.joinBridge(code: pasted) { onDone() } else { failed = "That isn't a Habla link or invite code." }
+        if store.joinBridge(code: pasted) { onDone() } else { failed = "That isn’t a Habla account or invite code." }
     }
 
     func makeInvite() {
@@ -618,58 +622,7 @@ struct LinkMacSheet: View {
         } catch StudioStore.HelpError.already {
             helpFailed = "This Mac already helps that library."
         } catch {
-            helpFailed = "That isn't a Habla link code."
-        }
-    }
-}
-
-public struct PairingSheet: View {
-    let pairing: StudioStore.PairingCode
-    let macName: String
-    let encrypted: Bool
-    let done: () -> Void
-
-    public init(pairing: StudioStore.PairingCode, macName: String, encrypted: Bool, done: @escaping () -> Void) {
-        self.pairing = pairing; self.macName = macName; self.encrypted = encrypted; self.done = done
-    }
-
-    public var body: some View {
-        HStack(alignment: .top, spacing: 36) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Pair your iPhone").font(Theme.display(34)).foregroundStyle(Theme.text)
-                VStack(alignment: .leading, spacing: 8) {
-                    step(1, "On the iPhone, open the Camera and point it at this code. Tap the Habla link.")
-                    step(2, "Or open Habla → MAC, choose “\(macName)” and type:")
-                }
-                Text(pairing.code).font(.system(size: 30, weight: .semibold, design: .monospaced)).tracking(2)
-                    .foregroundStyle(Theme.text).textSelection(.enabled).padding(.leading, 26)
-                TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    let left = max(0, Int(pairing.expires.timeIntervalSince(ctx.date)))
-                    Text(left > 0 ? "Works once · expires in \(left / 60):\(String(format: "%02d", left % 60))" : "This code expired")
-                        .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).monospacedDigit()
-                }.padding(.leading, 26)
-                Text(encrypted ? "Only paired devices can see your books. Everything between them and this Mac is encrypted."
-                               : "Only paired devices can see your books.")
-                    .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 10)
-                Spacer(minLength: 0)
-                PillButton("Done", filled: false, action: done).frame(width: 140)
-            }
-            .frame(width: 330, alignment: .leading)
-            QRCode(text: pairing.invite.absoluteString)
-                .frame(width: 220, height: 220)
-                .padding(16)
-                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.white))
-        }
-        .padding(36)
-        .frame(width: 680, height: 420)
-        .background(Theme.screen)
-    }
-
-    func step(_ n: Int, _ text: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text("\(n)").font(Theme.label(12)).foregroundStyle(Theme.accentText).frame(width: 16)
-            Text(text).font(Theme.grotesk(14)).foregroundStyle(Theme.text).fixedSize(horizontal: false, vertical: true)
+            helpFailed = "That isn’t a Habla account code."
         }
     }
 }

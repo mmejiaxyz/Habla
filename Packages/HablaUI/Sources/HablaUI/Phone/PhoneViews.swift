@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreImage
 import UniformTypeIdentifiers
 import HablaCore
 
@@ -61,7 +62,7 @@ public struct FloatingTabBar: View {
         HStack(spacing: 2) {
             item(.library, "Library", "books.vertical")
             item(.search, "Search", "magnifyingglass")
-            item(.mac, "Mac", "laptopcomputer")
+            item(.mac, "Account", "person.crop.circle")
         }
         .padding(5)
         .background(Capsule().fill(.ultraThinMaterial))
@@ -96,6 +97,7 @@ public struct PhoneLibraryView: View {
     var open: (PhoneRoute) -> Void
     @State private var picking = false
     @State private var confirmRemove: BookItem?
+    @State private var confirmDeleteAll: BookItem?
     @AppStorage("habla.library.sort") private var sort = LibrarySort.recent.rawValue
     @AppStorage("habla.library.list") private var listView = false
     @AppStorage("habla.library.hideTextOnly") private var hideTextOnly = false
@@ -128,9 +130,13 @@ public struct PhoneLibraryView: View {
         .confirmationDialog("Remove from this iPhone?", isPresented: Binding(get: { confirmRemove != nil }, set: { if !$0 { confirmRemove = nil } }),
                             titleVisibility: .visible, presenting: confirmRemove) { b in
             Button("Remove download", role: .destructive) { if player.bookID == b.id { player.unload() }; store.delete(b.id) }
-        } message: { _ in Text(store.paired == nil
+        } message: { _ in Text(!store.hasAccount
             ? "Your place and underlines are kept. To get it back, add the EPUB again."
             : "Your place and underlines are kept. You can download it again from your Mac.") }
+        .confirmationDialog("Delete from all your devices?", isPresented: Binding(get: { confirmDeleteAll != nil }, set: { if !$0 { confirmDeleteAll = nil } }),
+                            titleVisibility: .visible, presenting: confirmDeleteAll) { b in
+            Button("Delete everywhere", role: .destructive) { if player.bookID == b.id { player.unload() }; store.deleteEverywhere(b.id) }
+        } message: { _ in Text("The book and its narration go from this iPhone and every device in your account.") }
     }
 
     var library: some View {
@@ -183,7 +189,7 @@ public struct PhoneLibraryView: View {
             Spacer()
             Menu {
                 Button { picking = true } label: { Label("Import EPUB from Files", systemImage: "doc") }
-                Button { open(.mac) } label: { Label(store.paired == nil ? "Pair with a Mac" : "Your Mac", systemImage: "qrcode") }
+                Button { open(.mac) } label: { Label(store.hasAccount ? "Your account" : "Join your account", systemImage: "qrcode") }
             } label: { RoundIcon("plus") }
             .accessibilityLabel("Add books")
             Menu {
@@ -387,7 +393,8 @@ public struct PhoneLibraryView: View {
             if store.canNarrateOnPhone(b.id) && store.phoneNarration[b.id] == nil {
                 Button { store.narrateOnPhone(b.id) } label: { Label("Narrate on this iPhone", systemImage: "waveform") }
             }
-            Button(role: .destructive) { confirmRemove = b } label: { Label("Remove download", systemImage: "trash") }
+            Button(role: .destructive) { confirmRemove = b } label: { Label("Remove download", systemImage: "arrow.down.circle") }
+            Button(role: .destructive) { confirmDeleteAll = b } label: { Label("Delete everywhere", systemImage: "trash") }
         }
     }
 
@@ -411,8 +418,8 @@ public struct PhoneLibraryView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 VStack(spacing: 10) {
                     ActionPill("Add a book", symbol: "plus") { picking = true }.frame(width: 230)
-                    if store.paired == nil {
-                        ActionPill("Pair with your Mac", symbol: "laptopcomputer", style: .outline) { open(.mac) }.frame(width: 230)
+                    if !store.hasAccount {
+                        ActionPill("Join your account", symbol: "qrcode", style: .outline) { open(.mac) }.frame(width: 230)
                     }
                 }
                 .padding(.top, 18)
@@ -485,10 +492,12 @@ enum LibrarySort: String, CaseIterable {
 extension PhoneStore {
     public var isConnected: Bool { if case .connected = connection { return lastSync != nil }; return false }
     public var connectionSummary: String {
-        guard let mac = paired else { return "Not paired · open the Mac tab to pair with your Mac" }
+        guard hasAccount else { return "No account yet · scan your account’s QR code on your Mac" }
         switch connection {
         case .connected(let name, _): return lastSync == nil ? "Connecting to \(name)…" : "\(name) · synced \(Format.ago(lastSync))"
-        case .searching: return "Looking for \(mac.name.replacingOccurrences(of: "Habla on ", with: ""))…"
+        case .searching:
+            if let s = bridgeSynced { return "Synced through the cloud \(Format.ago(s)) · no Mac on this Wi-Fi" }
+            return "Looking for your Macs on this Wi-Fi…"
         case .unreachable: return "Mac not reachable · your books still work offline"
         }
     }
@@ -547,6 +556,7 @@ public struct PhoneBookView: View {
     var open: (PhoneRoute) -> Void
     var close: () -> Void
     @State private var confirmRemove = false
+    @State private var confirmDeleteAll = false
 
     public init(store: PhoneStore, player: NarrationPlayer, id: String, open: @escaping (PhoneRoute) -> Void, close: @escaping () -> Void) {
         self.store = store; self.player = player; self.id = id; self.open = open; self.close = close
@@ -564,9 +574,12 @@ public struct PhoneBookView: View {
         .onChange(of: book == nil) { _, gone in if gone { close() } }
         .confirmationDialog("Remove from this iPhone?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove download", role: .destructive) { if player.bookID == id { player.unload() }; store.delete(id); close() }
-        } message: { Text(store.paired == nil
+        } message: { Text(!store.hasAccount
             ? "Your place and underlines are kept. To get it back, add the EPUB again."
             : "Your place and underlines are kept. You can download it again from your Mac.") }
+        .confirmationDialog("Delete from all your devices?", isPresented: $confirmDeleteAll, titleVisibility: .visible) {
+            Button("Delete everywhere", role: .destructive) { if player.bookID == id { player.unload() }; store.deleteEverywhere(id); close() }
+        } message: { Text("The book and its narration go from this iPhone and every device in your account.") }
     }
 
     func content(_ b: BookItem) -> some View {
@@ -586,7 +599,8 @@ public struct PhoneBookView: View {
                             if store.canNarrateOnPhone(b.id) && store.phoneNarration[b.id] == nil {
                                 Button { store.narrateOnPhone(b.id) } label: { Label("Narrate on this iPhone", systemImage: "waveform") }
                             }
-                            Button(role: .destructive) { confirmRemove = true } label: { Label("Remove download", systemImage: "trash") }
+                            Button(role: .destructive) { confirmRemove = true } label: { Label("Remove download", systemImage: "arrow.down.circle") }
+                            Button(role: .destructive) { confirmDeleteAll = true } label: { Label("Delete everywhere", systemImage: "trash") }
                         } label: { RoundIcon("ellipsis", fill: Theme.paper.opacity(0.55)) }
                         .accessibilityLabel("More")
                     } else {
@@ -958,28 +972,28 @@ public struct PhonePlayerView: View {
     }
 }
 
-// MARK: - Mac connection (tab)
+// MARK: - Account (tab)
 
+/// The account: its name, its QR code (to add another device), the devices' sync state.
+/// Without one: how to join (scan the QR code on your Mac with the Camera, or paste its code).
 public struct PhoneMacView: View {
     @ObservedObject var store: PhoneStore
     var close: () -> Void
-    @State private var address = ""
     @State private var storageLine = ""
-    @State private var chosen: ServiceBrowser.Service?
     @State private var code = ""
-    @State private var confirmUnpair = false
-    @FocusState private var codeFocused: Bool
+    @State private var confirmLeave = false
+    @State private var showQR = false
 
     public init(store: PhoneStore, close: @escaping () -> Void) { self.store = store; self.close = close }
 
     public var body: some View {
         Scroll {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Mac").font(Theme.display(46)).foregroundStyle(Theme.text).accessibilityAddTraits(.isHeader)
+                Text("Account").font(Theme.display(46)).foregroundStyle(Theme.text).accessibilityAddTraits(.isHeader)
                     .padding(.horizontal, Theme.margin - 4).padding(.top, 12)
 
                 Group {
-                    if let mac = store.paired { pairedCard(mac) } else { pairingCard }
+                    if store.hasAccount { accountCard } else { joinCard }
                 }
                 .padding(.horizontal, 16).padding(.top, 18)
 
@@ -989,9 +1003,9 @@ public struct PhoneMacView: View {
                 }
 
                 VStack(spacing: 14) {
-                    Text("Your Mac narrates.\nThis iPhone listens.".uppercased()).font(Theme.display(26)).foregroundStyle(Theme.text)
+                    Text("One library.\nEvery device.".uppercased()).font(Theme.display(26)).foregroundStyle(Theme.text)
                         .multilineTextAlignment(.center)
-                    Text("Keep Habla open on your Mac and both on the same Wi-Fi. New books, narrated chapters and your place sync by themselves. Other computers on the network can’t see your books.")
+                    Text("Every book, your place and your underlines are on all the devices in your account. At home they sync over Wi-Fi; away, through an encrypted bridge that can’t read them.")
                         .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1008,9 +1022,9 @@ public struct PhoneMacView: View {
                     }
                     .padding(.vertical, 16).accessibilityElement(children: .combine)
                     Hairline()
-                    if store.paired != nil {
-                        Button { confirmUnpair = true } label: {
-                            HStack { Text("Unpair this Mac").font(Theme.grotesk(15)).foregroundStyle(Theme.accentText); Spacer() }
+                    if store.hasAccount {
+                        Button { confirmLeave = true } label: {
+                            HStack { Text("Leave this account").font(Theme.grotesk(15)).foregroundStyle(Theme.accentText); Spacer() }
                                 .padding(.vertical, 16).contentShape(Rectangle())
                         }.buttonStyle(.plain)
                         Hairline()
@@ -1022,9 +1036,23 @@ public struct PhoneMacView: View {
             }
         }
         .onAppear { storageLine = computeStorage() }
-        .confirmationDialog("Unpair “\(store.paired?.name ?? "")”?", isPresented: $confirmUnpair, titleVisibility: .visible) {
-            Button("Unpair", role: .destructive) { store.unpair() }
-        } message: { Text("Downloaded books stay on this iPhone. To sync again, pair from the Mac.") }
+        .confirmationDialog("Leave “\(store.accountName ?? "this account")”?", isPresented: $confirmLeave, titleVisibility: .visible) {
+            Button("Leave", role: .destructive) { store.leaveAccount() }
+        } message: { Text("Downloaded books stay on this iPhone, but nothing syncs until you scan the account’s QR code again.") }
+        .sheet(isPresented: $showQR) {
+            VStack(spacing: 18) {
+                Text(store.accountName ?? "Your account").font(Theme.display(30)).foregroundStyle(Theme.text)
+                if let link = store.accountLink {
+                    AccountQR(text: link.absoluteString).frame(width: 240, height: 240).padding(16)
+                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.white))
+                }
+                Text("Scan this with another iPhone’s Camera to add it to your account. Anyone with this code gets your library: only show it to your own devices.")
+                    .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(28)
+            .presentationDetents([.medium, .large])
+        }
     }
 
     func infoRow(_ title: String, _ value: String) -> some View {
@@ -1035,99 +1063,51 @@ public struct PhoneMacView: View {
         }
     }
 
-    func pairedCard(_ mac: PhoneStore.PairedMac) -> some View {
+    var accountCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle().fill(store.isConnected ? Color(hex: "#6BA878") : Theme.textDim.opacity(0.5)).frame(width: 8, height: 8)
                 Text(store.connectionSummary).font(Theme.grotesk(12)).foregroundStyle(Theme.text.opacity(0.7)).lineLimit(2)
             }
-            Text(mac.name.replacingOccurrences(of: "Habla on ", with: "")).font(Theme.display(32)).foregroundStyle(Theme.text)
+            Text(store.accountName ?? "Your account").font(Theme.display(32)).foregroundStyle(Theme.text)
                 .lineLimit(2).minimumScaleFactor(0.7)
-            if !mac.fingerprint.isEmpty {
-                Label("Paired · encrypted", systemImage: "lock.fill").font(Theme.grotesk(12)).foregroundStyle(Theme.textDim)
+            Label("Encrypted on every device", systemImage: "lock.fill").font(Theme.grotesk(12)).foregroundStyle(Theme.textDim)
+            HStack(spacing: 10) {
+                ActionPill(store.syncing ? "Syncing…" : "Sync now", style: .ink, height: 46) {
+                    Task { await store.sync(); await store.syncAccount() }
+                }
+                .disabled(store.syncing)
+                ActionPill("Show QR code", symbol: "qrcode", style: .outline, height: 46) { showQR = true }
             }
-            ActionPill(store.syncing ? "Syncing…" : "Sync now", style: .ink, height: 46) { Task { await store.sync() } }
-                .disabled(store.syncing).padding(.top, 10)
+            .padding(.top, 10)
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Theme.surface))
     }
 
-    var pairingCard: some View {
+    var joinCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Pair with your Mac").font(Theme.display(32)).foregroundStyle(Theme.text)
-            Text("In Habla on your Mac, choose Pair an iPhone. Scan the code it shows with the Camera, or pick your Mac below and type the code.")
+            Text("Join your account").font(Theme.display(32)).foregroundStyle(Theme.text)
+            Text("In Habla on your Mac, open Account. Scan its QR code with the Camera and tap the Habla link. Or copy its code and paste it here.")
                 .font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
-
-            CapsLabel("Macs on this Wi-Fi").padding(.top, 26)
-            if store.nearby.isEmpty {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Looking…").font(Theme.grotesk(14)).foregroundStyle(Theme.textDim)
-                }.padding(.top, 12)
-            }
-            VStack(spacing: 0) {
-                ForEach(store.nearby, id: \.self) { svc in
-                    Button { withAnimation { chosen = svc; code = ""; codeFocused = true } } label: {
-                        RuledRow(svc.name.replacingOccurrences(of: "Habla on ", with: ""), highlighted: chosen == svc, accent: Theme.accentText) {
-                            Image(systemName: chosen == svc ? "checkmark.circle.fill" : "circle").accessibilityHidden(true)
-                                .font(.system(size: 18))
-                                .foregroundStyle(chosen == svc ? Theme.accentText : Theme.textDim.opacity(0.5))
-                        }
-                        .contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                    .accessibilityAddTraits(chosen == svc ? .isSelected : [])
-                }
-            }.padding(.top, 4)
-
-            if let svc = chosen {
-                CapsLabel("Code shown on \(svc.name.replacingOccurrences(of: "Habla on ", with: ""))").padding(.top, 26)
-                HStack(spacing: 10) {
-                    TextField("XXXXX-XXXXX", text: $code)
-                        .focused($codeFocused)
-                        .textFieldStyle(.plain).font(.system(size: 20, weight: .medium, design: .monospaced))
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.characters)
-                        #endif
-                        .padding(.horizontal, 16).frame(height: 50)
-                        .background(Capsule().fill(Theme.paper))
-                        .onSubmit { pair(svc) }
-                    Button { pair(svc) } label: {
-                        Group { if store.pairingBusy { ProgressView().tint(Theme.paper) } else { Text("Pair") } }
-                            .font(.ui(15, weight: .medium)).foregroundStyle(Theme.paper)
-                            .padding(.horizontal, 22).frame(height: 50).background(Capsule().fill(Theme.ink))
-                    }
-                    .buttonStyle(.plain).disabled(Pairing.normalize(code).count < 10 || store.pairingBusy)
-                }.padding(.top, 12)
-            }
-
-            CapsLabel("Can't see your Mac?").padding(.top, 26)
-            Text("Type the address shown in Habla on your Mac (for example 192.168.1.20:8787).")
-                .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
             HStack(spacing: 10) {
-                TextField("192.168.1.20:8787", text: $address)
-                    .textFieldStyle(.plain).font(Theme.grotesk(16))
+                TextField("habla://account…", text: $code)
+                    .textFieldStyle(.plain).font(Theme.grotesk(15))
                     .autocorrectionDisabled()
                     #if os(iOS)
-                    .keyboardType(.URL).textInputAutocapitalization(.never)
+                    .textInputAutocapitalization(.never)
                     #endif
                     .padding(.horizontal, 16).frame(height: 46)
                     .background(Capsule().fill(Theme.paper))
-                CapsuleButton("Find", height: 46) {
-                    Task { if let svc = await store.lookUp(address: address) { withAnimation { chosen = svc; codeFocused = true } } }
-                }
-                .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty)
-            }.padding(.top, 12)
+                    .onSubmit { if store.joinAccount(code) { code = "" } }
+                CapsuleButton("Join", height: 46) { if store.joinAccount(code) { code = "" } }
+                    .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+            }.padding(.top, 18)
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Theme.surface))
-    }
-
-    func pair(_ svc: ServiceBrowser.Service) {
-        Task { await store.pair(at: svc.url, code: code) }
     }
 
     func computeStorage() -> String {
@@ -1135,5 +1115,27 @@ public struct PhoneMacView: View {
         let bytes = (FileManager.default.enumerator(at: store.library, includingPropertiesForKeys: [.fileSizeKey])?
             .compactMap { ($0 as? URL).flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } }.reduce(0, +)) ?? 0
         return "\(local.count) book\(local.count == 1 ? "" : "s")  ·  \(Format.bytes(bytes))"
+    }
+}
+
+/// A crisp QR code (Core Image, scaled without smoothing).
+public struct AccountQR: View {
+    let text: String
+    public init(text: String) { self.text = text }
+    public var body: some View {
+        if let image = Self.make(text) {
+            Image(decorative: image, scale: 1).interpolation(.none).resizable().aspectRatio(1, contentMode: .fit)
+                .accessibilityLabel("Account QR code")
+        } else {
+            Color.clear
+        }
+    }
+
+    static func make(_ text: String) -> CGImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(text.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let out = filter.outputImage else { return nil }
+        return CIContext().createCGImage(out, from: out.extent)
     }
 }
