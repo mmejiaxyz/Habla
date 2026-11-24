@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 import CoreImage
 import UniformTypeIdentifiers
 import HablaCore
@@ -983,6 +986,7 @@ public struct PhoneMacView: View {
     @State private var code = ""
     @State private var confirmLeave = false
     @State private var showQR = false
+    @State private var copiedCode = false
 
     public init(store: PhoneStore, close: @escaping () -> Void) { self.store = store; self.close = close }
 
@@ -1039,16 +1043,31 @@ public struct PhoneMacView: View {
         .confirmationDialog("Leave “\(store.accountName ?? "this account")”?", isPresented: $confirmLeave, titleVisibility: .visible) {
             Button("Leave", role: .destructive) { store.leaveAccount() }
         } message: { Text("Downloaded books stay on this iPhone, but nothing syncs until you scan the account’s QR code again.") }
-        .sheet(isPresented: $showQR) {
+        .sheet(isPresented: $showQR, onDismiss: { copiedCode = false }) {
             VStack(spacing: 18) {
                 Text(store.accountName ?? "Your account").font(Theme.display(30)).foregroundStyle(Theme.text)
                 if let link = store.accountLink {
                     AccountQR(text: link.absoluteString).frame(width: 240, height: 240).padding(16)
                         .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.white))
                 }
-                Text("Scan this with another iPhone’s Camera to add it to your account. Anyone with this code gets your library: only show it to your own devices.")
+                Text("Another iPhone: scan this with its Camera. A Mac: copy the code (or AirDrop it) and paste it in Habla → Join your account. Anyone with this code gets your library: only use it on your own devices.")
                     .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+                if let link = store.accountLink {
+                    HStack(spacing: 10) {
+                        ActionPill(copiedCode ? "Copied" : "Copy code", symbol: "doc.on.doc", style: .ink, height: 46) {
+                            #if canImport(UIKit)
+                            UIPasteboard.general.string = link.absoluteString
+                            #endif
+                            copiedCode = true
+                        }
+                        ShareLink(item: link.absoluteString) {
+                            Label("Share", systemImage: "square.and.arrow.up").font(Theme.grotesk(15)).foregroundStyle(Theme.text)
+                                .padding(.horizontal, 20).frame(height: 46)
+                                .background(Capsule().stroke(Theme.text.opacity(0.4)))
+                        }
+                    }
+                }
             }
             .padding(28)
             .presentationDetents([.medium, .large])
