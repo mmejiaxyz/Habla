@@ -90,6 +90,7 @@ public struct PhoneRoot: View {
         .onChange(of: phase) { _, p in
             switch p {
             case .active:
+                store.setForeground(true)
                 store.start()                           // restart discovery after sleep / network change
                 store.startLiveUpdates()
             case .inactive, .background:
@@ -97,7 +98,7 @@ public struct PhoneRoot: View {
                 player.flush()
                 saveReaderIfNeeded()
                 Task { await store.sync() }
-                if p == .background { store.bookClosed() }
+                if p == .background { store.setForeground(false); store.bookClosed() }
             @unknown default: break
             }
         }

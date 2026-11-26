@@ -182,9 +182,35 @@ never overwrite each other. Readers merge every document:
   "recipients": ["deviceID", ...],         // who must collect each book
   "received": ["transferID", ...],         // EPUBs this device collected
   "lastActive": "...",                     // heartbeat
-  "narrator": {"sentencesPerSecond": 1.3, "queuedSentences": 2400, "measured": true}
+  "narrator": {"sentencesPerSecond": 1.3, "queuedSentences": 2400, "measured": true},
+  "wants": ["bookID", ...]                 // books it is asking for right now (on demand)
 }
 ```
+
+### Books travel on demand
+
+A book goes through the bridge only while a device asks for it. Each device lists `wants`
+in its document: books another device holds a newer copy of, minus deleted, declined and
+revisions that turned out to add no audio. A Mac asks while it runs; an iPhone only while
+Habla is on screen and away from the home Mac (at home books come over Wi-Fi). The sender
+uploads a book only for a requester that is running (live connection, or checked in within
+5 minutes), and deletes its copy as soon as nobody running asks for it any more: the
+requester got it (any route), removed it, went to the background, or went quiet. While it
+has books waiting, a Mac looks again every 5½ minutes, so a phone that vanished leaves
+nothing behind; the 14-day cron stays as the last resort.
+
+**Freshly narrated books are parked.** When a Mac (or helper) finishes narrating a book here,
+it uploads it right away without being asked (`keepUntil` = 5 days), so a phone opening
+away from home gets it at once. It stays until every device of the account has it, then
+goes; after 5 days it goes unless someone is asking right then. Parked books need no
+5-minute re-checks (the Mac's nudges and 6-hourly look cover them). Helper Macs list their finished
+jobs in `has` so the account's devices can ask for them. A document without `wants` (an
+older version) is treated as asking for everything it lacks.
+
+While a book is on its way the iPhone shows it: a banner at the top of the library ("Getting
+“Title”" with a sweeping bar until the first bytes, then a filling bar and percentage) and
+the book's cover filling in from the bottom with a badge. It looks again every 12 s while
+waiting, for at most 15 minutes per visit.
 
 `Transfer = {id, kind: "book"|"epub", bookID?, revision?, filename?, manifest?: BookManifest,
 files: [{path, size, sha256, chunks: Int}], createdAt, target?}`. A receiver rebuilds each file from

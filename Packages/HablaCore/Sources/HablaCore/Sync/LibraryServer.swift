@@ -10,6 +10,8 @@ public final class LibraryServer: @unchecked Sendable {
     public var serviceName: String
     /// MD5 of the KOReader sync password set on the e-reader (KOSync's `x-auth-key`); nil = open on the LAN.
     public var koreaderKeyMD5: String?
+    /// The secret in the OPDS catalog's address (`opdsKey(password:)`); nil = no catalog.
+    public var opdsKey: String?
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "habla.server")

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// E-reader protocols served by the Mac (Habla Studio), for KOReader and the
 /// Xteink running CrossPoint:
@@ -8,7 +9,7 @@ import Foundation
 ///   Documents match by partial MD5 (Binary mode) or file-name MD5 (CrossPoint's default).
 ///   Positions translate to/from (chapter, sentence) through `KOReaderPositionMap`.
 ///
-/// - **OPDS catalog** (`/opds`): the device downloads the original EPUBs. CrossPoint names
+/// - **OPDS catalog** (`/opds/<key>`): the device downloads the original EPUBs. CrossPoint names
 ///   OPDS downloads itself ("Author - Title.epub"), so those copies match by Binary digest or
 ///   by the title/filename metadata the device sends — Habla configures Binary matching.
 extension HTTPResponse {
@@ -82,10 +83,17 @@ extension LibraryServer {
         }
     }
 
-    /// KOSync sends `x-auth-user` and `x-auth-key` (MD5 of the password). Open when no key is set.
+    /// KOSync sends `x-auth-user` and `x-auth-key` (MD5 of the password). Closed until this Mac
+    /// has set up an e-reader (that is what makes the password).
     func koreaderAuthorized(_ r: HTTPRequest) -> Bool {
-        guard let key = koreaderKeyMD5 else { return true }
-        return r.headers["x-auth-key"]?.lowercased() == key.lowercased()
+        guard let key = koreaderKeyMD5, let sent = r.headers["x-auth-key"] else { return false }
+        return Self.constantTimeEqual(sent.lowercased(), key.lowercased())
+    }
+
+    /// The secret part of the catalog's address. E-readers can't scan the account QR code, so
+    /// the Mac (already in the account) writes this address onto the device when it sets it up.
+    public static func opdsKey(password: String) -> String {
+        SHA256.hash(data: Data("habla-opds|\(password)".utf8)).map { String(format: "%02x", $0) }.joined().prefix(32).description
     }
 
     func book(forDocument document: String) -> (BookBundle, BookManifest)? {
@@ -106,14 +114,12 @@ extension LibraryServer {
     // MARK: OPDS
 
     func opdsRoute(_ r: HTTPRequest, _ parts: [String]) -> HTTPResponse {
-        if let token = accessToken, !basicAuthorized(r, token: token) {
-            var res = HTTPResponse.text(401, "Unauthorized")
-            res.headers["WWW-Authenticate"] = "Basic realm=\"Habla\""
-            return res
-        }
-        if parts == ["opds"] { return opdsFeed() }
-        if parts.count == 3, parts[1] == "books", parts[2].hasSuffix(".epub") {
-            let id = String(parts[2].dropLast(5))
+        // `/opds/<key>` and `/opds/<key>/books/<id>.epub`: without this Mac's key, nothing is there.
+        guard let key = opdsKey, parts.count >= 2, Self.constantTimeEqual(parts[1], key) else { return .text(404, "Not found") }
+        let parts = Array(parts.dropFirst(2))
+        if parts.isEmpty { return opdsFeed(key: key) }
+        if parts.count == 2, parts[0] == "books", parts[1].hasSuffix(".epub") {
+            let id = String(parts[1].dropLast(5))
             guard let m = manifest(id) else { return .text(404, "No such book") }
             let original = BookImporter.originalURL(for: id, in: library)
             guard FileManager.default.fileExists(atPath: original.path) else { return .text(404, "Original EPUB not kept") }
@@ -125,14 +131,8 @@ extension LibraryServer {
         return .text(404, "Not found")
     }
 
-    func basicAuthorized(_ r: HTTPRequest, token: String) -> Bool {
-        guard let h = r.headers["authorization"], h.lowercased().hasPrefix("basic "),
-              let data = Data(base64Encoded: String(h.dropFirst(6))),
-              let creds = String(data: data, encoding: .utf8) else { return false }
-        return creds.split(separator: ":", maxSplits: 1).last.map(String.init) == token
-    }
 
-    func opdsFeed() -> HTTPResponse {
+    func opdsFeed(key: String) -> HTTPResponse {
         func esc(_ s: String) -> String {
             s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
                 .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
@@ -147,7 +147,7 @@ extension LibraryServer {
                 <updated>\(iso.string(from: m.updatedAt))</updated>
                 <author><name>\(esc(m.author))</name></author>
                 <dc:language>\(esc(m.language))</dc:language>
-                <link rel="http://opds-spec.org/acquisition" href="/opds/books/\(m.id).epub" type="application/epub+zip"/>
+                <link rel="http://opds-spec.org/acquisition" href="/opds/\(key)/books/\(m.id).epub" type="application/epub+zip"/>
               </entry>
             """ }
             .joined(separator: "\n")
@@ -157,8 +157,8 @@ extension LibraryServer {
           <id>urn:habla:library</id>
           <title>\(esc(serviceName))</title>
           <updated>\(iso.string(from: Date()))</updated>
-          <link rel="self" href="/opds" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
-          <link rel="start" href="/opds" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
+          <link rel="self" href="/opds/\(key)" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
+          <link rel="start" href="/opds/\(key)" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
         \(entries)
         </feed>
         """

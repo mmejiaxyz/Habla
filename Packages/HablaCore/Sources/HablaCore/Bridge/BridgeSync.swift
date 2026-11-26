@@ -23,6 +23,9 @@ public struct Transfer: Codable, Equatable, Sendable {
     /// EPUB: the device chosen to narrate it, and the account voice to use.
     public var target: String? = nil
     public var voice: String? = nil
+    /// A book a Mac just finished narrating, put on the bridge without being asked: it stays
+    /// until every device has it, or until this date (then only while someone asks).
+    public var keepUntil: Date? = nil
 
     func logical(_ file: TransferFile, chunk: Int) -> String {
         switch kind {
@@ -104,6 +107,10 @@ public struct DeviceDocument: Codable, Equatable, Sendable {
     public var ledger: [BookEvent]? = nil
     /// Books this device chose not to keep (an iPhone's "Remove download"): nobody sends them here.
     public var declined: [String]? = nil
+    /// Books this device is asking for right now. A book goes through the bridge only while a
+    /// running device asks for it, and its copy there is deleted once nobody does.
+    /// nil: an older version that takes every book it lacks.
+    public var wants: [String]? = nil
 }
 
 /// Another device of the account, for the device list.
@@ -135,6 +142,13 @@ public actor BridgeSync {
     /// Books narrated here for another library: this sync never lists, sends or reports them.
     var hidden: @Sendable () -> Set<String> = { [] }
     var log: @Sendable (String) -> Void = { _ in }
+    /// Download progress of a book arriving through the bridge (0…1).
+    var onProgress: (@Sendable (String, Double) -> Void)?
+    public func setProgressHandler(_ handler: (@Sendable (String, Double) -> Void)?) { onProgress = handler }
+    /// Whether this device asks for the books it lacks (an iPhone stops when it leaves the screen
+    /// or is at home, where books come over Wi-Fi).
+    var asking = true
+    public func setAsking(_ on: Bool) { asking = on }
 
     /// Kept between launches: what other devices said last, our own transfers, what was sent.
     struct Saved: Codable {
@@ -161,6 +175,8 @@ public actor BridgeSync {
         var ledger: [String: BookEvent] = [:]
         /// Books this device doesn't want sent to it.
         var declined: Set<String> = []
+        /// Revisions offered that weren't worth installing (no more audio than ours): not asked again.
+        var notNeeded: [String: Int] = [:]
 
         init() {}
         // Older state files lack the newer fields: read what's there, default the rest.
@@ -181,6 +197,7 @@ public actor BridgeSync {
             jobs = try c.decodeIfPresent([String].self, forKey: .jobs) ?? []
             ledger = try c.decodeIfPresent([String: BookEvent].self, forKey: .ledger) ?? [:]
             declined = try c.decodeIfPresent(Set<String>.self, forKey: .declined) ?? []
+            notNeeded = try c.decodeIfPresent([String: Int].self, forKey: .notNeeded) ?? [:]
         }
     }
     var saved: Saved
@@ -259,6 +276,8 @@ public actor BridgeSync {
     static let activeWindow: TimeInterval = 5 * 60      // without a live connection
 
     static let transitLifetime: TimeInterval = 14 * 86400
+    /// How long a freshly narrated book waits on the bridge for devices that haven't asked yet.
+    static let parkLifetime: TimeInterval = 5 * 86400
 
     public init(config: BridgeConfig, deviceID: String, deviceName: String, role: DeviceDocument.Role,
                 progress: ProgressStore, markers: MarkerStore, library: URL, stateURL: URL, session: URLSession = .shared) {
@@ -327,9 +346,11 @@ public actor BridgeSync {
 
     func ownDocument() -> DeviceDocument {
         if role == .helper {
+            // Only its finished jobs, so the account's devices can ask for them.
+            let ready = localBooks().filter { $0.isFullyRendered && saved.jobs.contains($0.id) }
             return DeviceDocument(deviceID: deviceID, deviceName: deviceName, kind: role, updatedAt: Date(), positions: [], markers: [],
-                                  has: [], outbox: saved.outbox, recipients: recipients(), received: saved.received,
-                                  lastActive: nil, narrator: narrator, settings: nil, ledger: nil, declined: nil)
+                                  has: ready.map { HeldBook(bookID: $0.id, revision: $0.revision) }, outbox: saved.outbox, recipients: recipients(), received: saved.received,
+                                  lastActive: nil, narrator: narrator, settings: nil, ledger: nil, declined: nil, wants: [])
         }
         return DeviceDocument(deviceID: deviceID, deviceName: deviceName, kind: role, updatedAt: Date(),
                        positions: progress.all.sorted { $0.bookID < $1.bookID },
@@ -337,7 +358,8 @@ public actor BridgeSync {
                        has: localBooks().map { HeldBook(bookID: $0.id, revision: $0.revision) }.sorted { $0.bookID < $1.bookID },
                        outbox: saved.outbox, recipients: recipients(), received: saved.received,
                        lastActive: nil, narrator: narrator, settings: saved.settings,
-                       ledger: saved.ledger.values.sorted { $0.bookID < $1.bookID }, declined: saved.declined.sorted())
+                       ledger: saved.ledger.values.sorted { $0.bookID < $1.bookID }, declined: saved.declined.sorted(),
+                       wants: wants())
     }
 
     /// Uploads this device's document when its content changed.
@@ -408,6 +430,55 @@ public actor BridgeSync {
         !(d.declined ?? []).contains(id) && !d.has.contains { $0.bookID == id && $0.revision >= rev }
     }
 
+    /// Whether `d` is asking for revision `rev` of book `id` right now: it lacks it, lists it in
+    /// its wants and is running. (An older device without wants takes every book it lacks.)
+    func wanting(_ d: DeviceDocument, _ id: String, _ rev: Int) -> Bool {
+        guard lacks(d, id, rev) else { return false }
+        guard let wants = d.wants else { return true }
+        return wants.contains(id) && isActive(d)
+    }
+
+    /// The books this device asks for: another device has a newer copy, and it isn't deleted,
+    /// declined, or a revision that turned out to add nothing.
+    public func wants() -> [String] {
+        guard asking, role != .helper else { return [] }
+        let mine = Dictionary(localBooks().map { ($0.id, $0.revision) }, uniquingKeysWith: { a, _ in a })
+        var out = Set<String>()
+        for d in others {
+            for h in d.has where h.revision > (mine[h.bookID] ?? -1) && h.revision > (saved.notNeeded[h.bookID] ?? -1)
+                && !isDeleted(h.bookID) && !saved.declined.contains(h.bookID) { out.insert(h.bookID) }
+        }
+        return out.sorted()
+    }
+
+    /// Books on their way here through the bridge: the title once the sender has uploaded it.
+    /// (Asked for, or already waiting there because a Mac just narrated it.)
+    public func incoming() -> [(id: String, manifest: BookManifest?)] {
+        guard role != .helper else { return [] }
+        let mine = Dictionary(localBooks().map { ($0.id, $0.revision) }, uniquingKeysWith: { a, _ in a })
+        let offered = others.flatMap(\.outbox).filter { t in
+            guard t.kind == .book, let id = t.bookID, let m = t.manifest else { return false }
+            return m.revision > (mine[id] ?? -1) && m.revision > (saved.notNeeded[id] ?? -1)
+                && !isDeleted(id) && !saved.declined.contains(id)
+        }
+        var ids = wants()
+        for t in offered where !ids.contains(t.bookID!) { ids.append(t.bookID!) }
+        return ids.map { id in (id, offered.first { $0.bookID == id }?.manifest) }
+    }
+
+    /// Whether this device has books waiting on the bridge for someone (look again soon:
+    /// a requester that went quiet must not leave them there).
+    public var hasBooksInTransit: Bool {
+        saved.outbox.contains { $0.kind == .book && ($0.keepUntil ?? .distantPast) < Date() }
+    }
+
+    /// A Mac (or helper) finished narrating this revision here in the last 5 days: it goes up
+    /// to the bridge right away, without waiting to be asked.
+    func justNarratedHere(_ m: BookManifest) -> Bool {
+        role != .phone && m.isFullyRendered && saved.receivedBooks[m.id] != m.revision
+            && Date().timeIntervalSince(m.updatedAt) < Self.parkLifetime
+    }
+
     /// Of the devices holding the newest copy of a book (this one included), the one that sends
     /// it: a running Mac before an iPhone, then the lowest id, so only one device uploads it.
     func sender(of m: BookManifest) -> String {
@@ -443,7 +514,8 @@ public actor BridgeSync {
                 return m.isFullyRendered || (self.role == .phone && !macHas.contains(m.id))
             }
             for m in mine {
-                guard held.contains(where: { self.lacks($0, m.id, m.revision) }),
+                let park = self.justNarratedHere(m) && self.saved.published[m.id] != m.revision
+                guard held.contains(where: { park ? self.lacks($0, m.id, m.revision) : self.wanting($0, m.id, m.revision) }),
                       // An unfinished book goes once (each narrated chapter makes a new revision):
                       // the Mac that collects it finishes the narration.
                       !self.saved.outbox.contains(where: { $0.kind == .book && $0.bookID == m.id && ($0.revision == m.revision || !m.isFullyRendered) }),
@@ -453,7 +525,7 @@ public actor BridgeSync {
                 guard usage.freeBytes > size + size / 10 else { self.log("bridge: waiting for room to send \(m.id)"); continue }
                 let transfer = Transfer(id: "\(m.id)-\(m.revision)", kind: .book, bookID: m.id, revision: m.revision, filename: nil, manifest: m,
                                         files: m.files.map { TransferFile(path: $0.path, size: $0.size, sha256: $0.sha256, chunks: Self.chunks($0.size)) },
-                                        createdAt: Date())
+                                        createdAt: Date(), keepUntil: park ? Date().addingTimeInterval(Self.parkLifetime) : nil)
                 let bundle = BookBundle(url: BookBundle.url(for: m.id, in: self.library))
                 self.log("Sending “\(m.title)” to your other devices…")
                 try await self.upload(transfer) { bundle.fileURL($0.path) }
@@ -486,7 +558,10 @@ public actor BridgeSync {
                     guard let m = t.manifest, m.id == t.bookID, !installed.contains(m.id),
                           !self.isDeleted(m.id), !self.saved.declined.contains(m.id) else { continue }
                     if let mine = local[m.id] {
-                        guard ready(m) > ready(mine) || (ready(m) == ready(mine) && m.revision > mine.revision) else { continue }
+                        guard ready(m) > ready(mine) || (ready(m) == ready(mine) && m.revision > mine.revision) else {
+                            if (self.saved.notNeeded[m.id] ?? -1) < m.revision { self.saved.notNeeded[m.id] = m.revision; self.save() }
+                            continue
+                        }
                     }
                     do {
                         try await self.install(t, manifest: m)
@@ -511,10 +586,17 @@ public actor BridgeSync {
         let fm = FileManager.default
         let old = try? bundle.manifest()
         let oldHashes = Dictionary((old?.files ?? []).map { ($0.path, $0.sha256) }, uniquingKeysWith: { a, _ in a })
-        for f in t.files {
+        let needed = t.files.filter { f in
+            !(oldHashes[f.path] == f.sha256 && (try? fm.attributesOfItem(atPath: bundle.fileURL(f.path).path)[.size] as? Int) == f.size)
+        }
+        let total = max(1, needed.reduce(0) { $0 + $1.size })
+        var done = 0
+        onProgress?(m.id, 0)
+        for f in needed {
             let dest = bundle.fileURL(f.path)
-            if oldHashes[f.path] == f.sha256, (try? fm.attributesOfItem(atPath: dest.path)[.size] as? Int) == f.size { continue }
-            let temp = try await download(t, f)
+            let before = done
+            let temp = try await download(t, f) { [onProgress] bytes in onProgress?(m.id, Double(before + bytes) / Double(total)) }
+            done += f.size
             try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             if fm.fileExists(atPath: dest.path) { _ = try fm.replaceItemAt(dest, withItemAt: temp) } else { try fm.moveItem(at: temp, to: dest) }
         }
@@ -615,8 +697,16 @@ public actor BridgeSync {
                 let expired = now.timeIntervalSince(t.createdAt) > Self.transitLifetime
                 let delivered: Bool
                 switch t.kind {
-                case .book: delivered = !phones.isEmpty && phones.allSatisfy { !self.lacks($0, t.bookID ?? "", t.revision ?? 0) }
-                    || self.isDeleted(t.bookID ?? "")
+                // On demand: gone as soon as nobody running is asking for it (they got it, by
+                // any route, removed it, or stopped asking).
+                case .book:
+                    let id = t.bookID ?? "", rev = t.revision ?? 0
+                    if let until = t.keepUntil, until > now {
+                        // Freshly narrated: waits for every device (asked or not) for 5 days.
+                        delivered = !phones.contains { self.lacks($0, id, rev) } || self.isDeleted(id)
+                    } else {
+                        delivered = !phones.contains { self.wanting($0, id, rev) } || self.isDeleted(id)
+                    }
                 case .epub: delivered = macReceived.contains(t.id)
                 }
                 if expired || delivered {
@@ -664,7 +754,7 @@ public actor BridgeSync {
     }
 
     /// Reassembles one file into a temporary file and checks its SHA-256.
-    func download(_ t: Transfer, _ f: TransferFile) async throws -> URL {
+    func download(_ t: Transfer, _ f: TransferFile, progress: ((Int) -> Void)? = nil) async throws -> URL {
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent("bridge-\(UUID().uuidString)")
         FileManager.default.createFile(atPath: temp.path, contents: nil)
         let out = try FileHandle(forWritingTo: temp)
@@ -676,6 +766,7 @@ public actor BridgeSync {
                 let plain = try keys.open(blob, logical: logical)
                 hasher.update(data: plain)
                 try out.write(contentsOf: plain)
+                progress?(min(f.size, (i + 1) * BridgeKeys.chunkSize))
             }
             try out.close()
         } catch {

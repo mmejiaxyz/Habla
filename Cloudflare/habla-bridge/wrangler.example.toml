@@ -27,7 +27,7 @@ new_sqlite_classes = ["Room"]
 [[d1_databases]]
 binding = "DB"
 database_name = "habla-bridge-ledger"
-database_id = "b5e5efc4-f1bc-4189-9b0d-0a04e58d1616"
+database_id = "<your D1 id, from: wrangler d1 create habla-bridge-ledger>"
 
 [vars]
 STORAGE_CAP_BYTES = "8589934592"   # 8 GiB, Habla + Portfolio together (free: 10 GB)

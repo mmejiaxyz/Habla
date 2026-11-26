@@ -46,7 +46,7 @@ let readerPageHeight = phone.height - deviceInsets.top - deviceInsets.bottom - 7
         .sorted { $0.lastPathComponent < $1.lastPathComponent }
     let root = makeRoot("langs", books: bundles)
     let store = PhoneStore(root: root)
-    store.previewState(remote: [], connection: .connected(name: "Habla on MacBook Pro", url: URL(string: "http://192.168.1.20:8787")!),
+    store.previewState(remote: [], connection: .connected(name: "Habla on MacBook Pro", url: URL(string: "http://10.0.0.20:8787")!),
                        lastSync: Date(), paired: .init(libraryID: "a", name: "Habla on MacBook Pro", fingerprint: ""))
     render("lang-library", PhoneLibraryView(store: store, player: NarrationPlayer(), open: { _ in }))
     for b in bundles {
@@ -74,7 +74,7 @@ let readerPageHeight = phone.height - deviceInsets.top - deviceInsets.bottom - 7
     if bundles.count > 1 { store.savePosition(book: manifests[bundles.firstIndex(of: main.0) == 0 ? 1 : 0].id, chapter: 3, sentence: 10, audioTime: nil, mode: .reading) }
     var remote = manifests.dropFirst(4).map { LibraryEntry(manifest: $0) }
     if remote.isEmpty, var e = manifests.last.map(LibraryEntry.init(manifest:)) { e.id = "remote-sample"; e.title = "Persuasion"; e.author = "Jane Austen"; remote = [e] }
-    store.previewState(remote: remote, connection: .connected(name: "Habla on MacBook Pro", url: URL(string: "http://192.168.1.20:8787")!),
+    store.previewState(remote: remote, connection: .connected(name: "Habla on MacBook Pro", url: URL(string: "http://10.0.0.20:8787")!),
                        lastSync: Date().addingTimeInterval(-120),
                        paired: .init(libraryID: "a", name: "Habla on MacBook Pro", fingerprint: String(repeating: "ab", count: 32)))
     let player = NarrationPlayer()
@@ -87,13 +87,19 @@ let readerPageHeight = phone.height - deviceInsets.top - deviceInsets.bottom - 7
     render("p4-mac", PhoneMacView(store: store, close: {}))
     let unpaired = PhoneStore(root: makeRoot("unpaired", books: []))
     unpaired.previewState(remote: [], connection: .searching, lastSync: nil,
-                          nearby: [.init(name: "Habla on Studio iMac", url: URL(string: "https://192.168.1.31:8787")!, libraryID: "b"),
-                                   .init(name: "Habla on Manuel’s MacBook Pro", url: URL(string: "https://192.168.1.20:8787")!, libraryID: "a")])
+                          nearby: [.init(name: "Habla on Studio iMac", url: URL(string: "https://10.0.0.31:8787")!, libraryID: "b"),
+                                   .init(name: "Habla on MacBook Pro", url: URL(string: "https://10.0.0.20:8787")!, libraryID: "a")])
     render("p11-pair", PhoneMacView(store: unpaired, close: {}))
 
     let empty = PhoneStore(root: makeRoot("empty", books: []))
     empty.previewState(remote: [], connection: .searching, lastSync: nil)
     render("p5-library-empty", PhoneLibraryView(store: empty, player: NarrationPlayer(), open: { _ in }))
+    // Books coming through the cloud: one arriving (cover filling in), one the Mac is still sending.
+    let cloudRoot = makeRoot("phone-cloud", books: [])
+    let cloudStore = PhoneStore(root: cloudRoot)
+    var arriving = main.1; arriving.id = "cloud-arriving"
+    cloudStore.previewState(remote: [], connection: .searching, lastSync: nil, cloud: [(arriving, 0.62), (nil, 0)])
+    render("p13-cloud-download", PhoneLibraryView(store: cloudStore, player: NarrationPlayer(), open: { _ in }))
 
     // Reader pages: compute the page size the way ReaderView does on a phone.
     func reader(_ name: String, _ theme: ReaderTheme, chrome: Bool, chapter: Int, sentence: Int?, highlight: Bool, size: CGFloat = 19) {
@@ -129,12 +135,12 @@ let readerPageHeight = phone.height - deviceInsets.top - deviceInsets.bottom - 7
     let other = manifests.first { $0.id != main.1.id }
     studio.previewState(render: other.map { StudioStore.RenderState(bookID: $0.id, chapterTitle: $0.chapters[min(3, $0.chapters.count - 1)].title, sentence: 41, sentenceCount: 120, chaptersDone: 2, chaptersTotal: 20, secondsLeft: 3900) },
                         queue: other.map { [$0.id] } ?? [], phoneLastSeen: Date().addingTimeInterval(-90),
-                        xteink: .done("4 books on Xteink X4 · up to date"), server: "192.168.1.20:8787")
+                        xteink: .done("4 books on Xteink X4 · up to date"), server: "10.0.0.20:8787")
     render("m1-studio", StudioWindowView(store: studio, installScript: URL(fileURLWithPath: "/tmp/install.sh"), openReader: { _ in }), size: mac, scale: 2)
     if let o = other { studio.selection = o.id }
     render("m2-studio-narrating", StudioWindowView(store: studio, installScript: nil, openReader: { _ in }), size: mac, scale: 2)
     let emptyStudio = StudioStore(support: makeRoot("studio-empty", books: []))
-    emptyStudio.previewState(render: nil, queue: [], phoneLastSeen: nil, xteink: .looking, server: "192.168.1.20:8787")
+    emptyStudio.previewState(render: nil, queue: [], phoneLastSeen: nil, xteink: .looking, server: "10.0.0.20:8787")
     render("m3-studio-empty", StudioWindowView(store: emptyStudio, installScript: URL(fileURLWithPath: "/tmp/install.sh"), openReader: { _ in }), size: mac, scale: 2)
 
     let spread = ReaderModel(bundle: mb, manifest: main.1, chapter: audioChapter, sentence: 14, style: ReaderStyle(), columns: 2)

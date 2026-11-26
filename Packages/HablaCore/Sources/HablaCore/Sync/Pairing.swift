@@ -65,7 +65,7 @@ public struct PairingInvite: Equatable, Sendable {
     public var host = "join"
     public var libraryID: String
     public var name: String
-    public var address: String?       // "192.168.1.20:8787" (hint; Bonjour finds it anyway)
+    public var address: String?       // "10.0.0.20:8787" (hint; Bonjour finds it anyway)
     public var fingerprint: String
     public var code: String
 

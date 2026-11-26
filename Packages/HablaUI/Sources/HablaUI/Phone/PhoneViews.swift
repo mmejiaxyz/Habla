@@ -114,7 +114,7 @@ public struct PhoneLibraryView: View {
     /// What's playing, else the book you were last in, else the first one.
     var hero: BookItem? {
         if let id = player.bookID, let b = local.first(where: { $0.id == id }) { return b }
-        return store.current ?? local.first
+        return store.current ?? local.first { $0.availability == .local }    // never a book still downloading
     }
     var shelf: [BookItem] {
         let books = local.filter { !(hideTextOnly && $0.isTextOnly) }
@@ -123,7 +123,7 @@ public struct PhoneLibraryView: View {
 
     public var body: some View {
         Group {
-            if store.books.isEmpty && store.importing == 0 { emptyState }
+            if store.books.isEmpty && store.importing == 0 && store.cloudIncoming.isEmpty { emptyState }
             else { library }
         }
         .fileImporter(isPresented: $picking, allowedContentTypes: [UTType(filenameExtension: "epub") ?? .data],
@@ -146,6 +146,11 @@ public struct PhoneLibraryView: View {
         Scroll {
             VStack(alignment: .leading, spacing: 0) {
                 header.padding(.horizontal, Theme.margin - 4).padding(.top, 12)
+
+                if !store.cloudIncoming.isEmpty {
+                    CloudIncomingBanner(items: store.cloudIncoming).padding(.horizontal, 16).padding(.top, 18)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
 
                 if let hero { heroCard(hero).padding(.horizontal, 16).padding(.top, 18) }
 
@@ -314,11 +319,13 @@ public struct PhoneLibraryView: View {
             Button { open(.book(b.id)) } label: {
                 cover(b)
                     .shadow(color: .black.opacity(0.18), radius: 12, y: 8)
-                    .overlay(alignment: .bottomTrailing) {
+                    .overlay {
                         if case .downloading(let f) = b.availability {
-                            ProgressRing(value: f, color: Theme.paper).frame(width: 26, height: 26).padding(10)
+                            DownloadVeil(fraction: f).clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                .transition(.opacity)
                         }
                     }
+                    .animation(.easeOut(duration: 0.4), value: b.availability)
             }
             .buttonStyle(PressStyle())
             .contextMenu { bookActions(b) }
@@ -352,7 +359,7 @@ public struct PhoneLibraryView: View {
         if store.isWaitingForMac(b.id) { return "Waiting for your Mac" }
         switch b.availability {
         case .remote: return b.isTextOnly ? "Text only" : b.isFullyNarrated ? "Narrated" : "Narrating \(b.narrated)/\(b.narratable)"
-        case .downloading(let f): return "Downloading \(Int(f * 100))%"
+        case .downloading(let f): return f > 0 ? "Downloading \(Int(f * 100))%" : "Getting it from your Mac"
         case .local:
             if b.isStarted { return "\(Int((b.progress * 100).rounded()))%" }
             return b.isTextOnly ? "Text only" : "New"

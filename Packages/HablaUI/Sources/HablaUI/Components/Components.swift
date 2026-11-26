@@ -242,12 +242,23 @@ public struct CapsLabel: View {
 public struct ProgressRing: View {
     var value: Double
     var color: Color
-    public init(value: Double, color: Color = Theme.accent) { self.value = value; self.color = color }
+    var lineWidth: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spin = false
+    public init(value: Double, color: Color = Theme.accent, lineWidth: CGFloat = 2) { self.value = value; self.color = color; self.lineWidth = lineWidth }
     public var body: some View {
         ZStack {
-            Circle().stroke(Theme.hairline, lineWidth: 2)
-            Circle().trim(from: 0, to: min(1, max(0.02, value))).stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                .rotationEffect(.degrees(-90))
+            Circle().stroke(Theme.hairline, lineWidth: lineWidth)
+            if value <= 0 {
+                // Not started yet (the Mac is still sending it): a turning arc, not a stuck 0 %.
+                Circle().trim(from: 0, to: 0.28).stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(spin ? 270 : -90))
+                    .onAppear { guard !reduceMotion else { return }; withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) { spin = true } }
+            } else {
+                Circle().trim(from: 0, to: min(1, max(0.02, value))).stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeOut(duration: 0.4), value: value)
+            }
         }
         .accessibilityElement()
         .accessibilityLabel("Progress")
@@ -346,5 +357,108 @@ public struct Scroll<Content: View>: View {
     public var body: some View {
         if isStatic { content.fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top).clipped() }
         else { ScrollView(showsIndicators: false) { content } }
+    }
+}
+
+/// Over a book cover while it downloads: the cover fills in from the bottom as the bytes
+/// arrive, a light sweep runs across what's still to come, and a ring shows the percentage
+/// (a turning arc while the Mac is still sending it).
+public struct DownloadVeil: View {
+    var fraction: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sweep = false
+    public init(fraction: Double) { self.fraction = fraction }
+    public var body: some View {
+        GeometryReader { geo in
+            let f = min(1, max(0, fraction))
+            ZStack {
+                // What hasn't arrived yet stays veiled; the veil shrinks from the bottom up.
+                VStack(spacing: 0) {
+                    ZStack {
+                        Rectangle().fill(Theme.ink.opacity(0.55))
+                        if !reduceMotion {
+                            LinearGradient(colors: [.clear, Theme.paper.opacity(0.22), .clear], startPoint: .leading, endPoint: .trailing)
+                                .frame(width: geo.size.width * 0.6)
+                                .offset(x: sweep ? geo.size.width : -geo.size.width)
+                                .onAppear { withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: false)) { sweep = true } }
+                        }
+                    }
+                    .frame(height: geo.size.height * (1 - f))
+                    .clipped()
+                    Spacer(minLength: 0)
+                }
+                .animation(.easeOut(duration: 0.5), value: f)
+
+                // A solid badge, readable on any cover.
+                VStack {
+                    Spacer()
+                    HStack(spacing: 8) {
+                        ProgressRing(value: fraction, color: Theme.paper, lineWidth: 2.5).frame(width: 18, height: 18)
+                        Text(fraction > 0 ? "\(Int((f * 100).rounded()))%" : "Waiting")
+                            .font(.ui(13, weight: .semibold)).foregroundStyle(Theme.paper)
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                            .animation(.easeOut(duration: 0.3), value: Int(f * 100))
+                    }
+                    .padding(.horizontal, 12).frame(height: 32)
+                    .background(Capsule().fill(Theme.ink.opacity(0.88)))
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement()
+        .accessibilityLabel(fraction > 0 ? "Downloading" : "Waiting for your Mac")
+        .accessibilityValue(fraction > 0 ? "\(Int((min(1, max(0, fraction)) * 100).rounded())) percent" : "")
+    }
+}
+
+/// Top of the library while books come through the cloud: how many, from where, and a bar
+/// that moves (a sweep until the first bytes arrive).
+public struct CloudIncomingBanner: View {
+    var items: [PhoneStore.CloudIncoming]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sweep = false
+    public init(items: [PhoneStore.CloudIncoming]) { self.items = items }
+
+    var started: [PhoneStore.CloudIncoming] { items.filter { ($0.fraction ?? 0) > 0 } }
+    var overall: Double { started.isEmpty ? 0 : items.reduce(0) { $0 + ($1.fraction ?? 0) } / Double(items.count) }
+    var title: String {
+        if items.count == 1, let t = items[0].title { return started.isEmpty ? "Getting “\(t)”" : "Downloading “\(t)”" }
+        return started.isEmpty ? "Getting \(items.count) books" : "Downloading \(items.count) books"
+    }
+    var detail: String {
+        started.isEmpty ? "Your Mac is sending it through the cloud. Keep Habla open." : "\(Int((overall * 100).rounded()))%  ·  keep Habla open"
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                ProgressRing(value: overall, color: Theme.accentText, lineWidth: 2.5).frame(width: 26, height: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.ui(15, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                    Text(detail).font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).lineLimit(2)
+                        .contentTransition(.numericText()).animation(.easeOut(duration: 0.3), value: Int(overall * 100))
+                }
+                Spacer(minLength: 0)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Theme.hairline)
+                    if started.isEmpty {
+                        Capsule().fill(Theme.accentText.opacity(0.7)).frame(width: geo.size.width * 0.3)
+                            .offset(x: reduceMotion ? 0 : (sweep ? geo.size.width * 0.7 : 0))
+                            .onAppear { guard !reduceMotion else { return }; withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) { sweep = true } }
+                    } else {
+                        Capsule().fill(Theme.accentText).frame(width: max(6, geo.size.width * overall))
+                            .animation(.easeOut(duration: 0.5), value: overall)
+                    }
+                }
+            }
+            .frame(height: 4)
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Theme.surface))
+        .accessibilityElement(children: .combine)
     }
 }

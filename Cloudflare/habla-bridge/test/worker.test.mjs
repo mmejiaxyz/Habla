@@ -111,6 +111,7 @@ test('storage cap counts Portfolio and refuses before uploading', async () => {
 
 test('operation and request caps refuse without touching R2', async () => {
   const e = await enrolled({ CLASS_A_CAP: '1', CLASS_B_CAP: '1', REQUESTS_CAP_DAY: '8' });
+  for (let i = 0; i < 20; i++) await call(e, 'GET', '/v1/state', { token: 'junk-' + 'c'.repeat(40) });  // strangers don't spend the day
   assert.equal((await call(e, 'PUT', `/v1/state/${NAME}`, { body: 'a' })).status, 200);
   assert.equal((await call(e, 'PUT', `/v1/state/${NAME}`, { body: 'b' })).status, 429);
   assert.equal((await call(e, 'GET', `/v1/state/${NAME}`)).status, 200);

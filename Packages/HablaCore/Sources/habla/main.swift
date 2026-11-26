@@ -138,17 +138,21 @@ do {
 
     case "serve":
         let port = UInt16(option("port") ?? "") ?? SyncProtocol.defaultPort
+        // Never open on the network: without --token, make one and print it (give it to `habla pull --token`).
+        let token = option("token") ?? (0..<24).map { _ in String("abcdefghjkmnpqrstuvwxyz23456789".randomElement()!) }.joined()
         let server = LibraryServer(library: library, progress: ProgressStore(fileURL: progressFile),
-                                   serviceName: "Habla on \(Host.current().localizedName ?? "Mac")", accessToken: option("token"))
+                                   serviceName: "Habla on \(Host.current().localizedName ?? "Mac")", accessToken: token)
         server.onEvent = { print("  \($0)") }
         server.allowEReaders = true   // `habla serve` is the e-reader (KOReader/OPDS) server
         // Xteink sync password (created by `habla xteink setup`); KOSync sends its MD5.
         if let d = try? Data(contentsOf: dataDir.appendingPathComponent(customLibrary == nil ? "xteink.json" : ".xteink.json")),
            let c = try? JSONDecoder().decode([String: String].self, from: d), let pw = c["password"] {
             server.koreaderKeyMD5 = KOReaderDigest.filename(pw)
+            server.opdsKey = LibraryServer.opdsKey(password: pw)
         }
         let bound = try await server.start(port: port)
         print("Serving \(library.path) on port \(bound) (Bonjour \(SyncProtocol.bonjourType)). Ctrl-C to stop.")
+        if option("token") == nil { print("Access token: \(token)") }
         while true { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
 
     case "pull":

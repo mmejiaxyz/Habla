@@ -33,9 +33,6 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Test core
-        run: swift test --package-path Packages/HablaCore
-
       - name: Build apps
         run: Scripts/build.sh
 

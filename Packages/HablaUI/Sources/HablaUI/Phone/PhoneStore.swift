@@ -49,6 +49,15 @@ public final class PhoneStore: ObservableObject {
     private var routing: Set<String> = []
     var remote: [LibraryEntry] = []
     var downloading: [String: Double] = [:]
+    private var cloudManifests: [String: BookManifest] = [:]
+    /// Books on their way through the cloud (asked for, away from the home Mac): the title once
+    /// the sender has uploaded it, nil while it's still being sent.
+    @Published public private(set) var cloudIncoming: [CloudIncoming] = []
+    public struct CloudIncoming: Equatable, Sendable { public var id: String; public var title: String?; public var fraction: Double? }
+    /// While Habla is on screen (it asks for books only then: nothing waits on the bridge otherwise).
+    var isForeground = true
+    private var waitingSince: Date?
+    private var cloudPoll: Task<Void, Never>?
     /// Books being refreshed in the background (new chapters): they stay fully usable.
     @Published public private(set) var updating: Set<String> = []
     /// A newer Habla for iPhone published on GitHub (installed through AltStore).
@@ -115,6 +124,11 @@ public final class PhoneStore: ObservableObject {
         for e in remote where !localIDs.contains(e.id) && !deletedIDs.contains(e.id) {
             let avail: BookItem.Availability = downloading[e.id].map { .downloading(fraction: $0) } ?? .remote(bytes: e.totalBytes)
             items.append(BookItem(entry: e, position: progress.position(for: e.id), availability: avail))
+        }
+        for c in cloudIncoming where !localIDs.contains(c.id) && !items.contains(where: { $0.id == c.id }) {
+            guard let m = cloudManifests[c.id] else { continue }
+            items.append(BookItem(entry: LibraryEntry(manifest: m), position: progress.position(for: c.id),
+                                  availability: .downloading(fraction: downloading[c.id] ?? 0)))
         }
         for i in items.indices { if let f = downloading[items[i].id], items[i].availability == .local { items[i].availability = .downloading(fraction: f) } }
         // Most recently opened first, then new books, then the rest alphabetically.
@@ -460,7 +474,17 @@ public final class PhoneStore: ObservableObject {
                            markers: markers, library: library,
                            stateURL: library.deletingLastPathComponent().appendingPathComponent("bridge-state.json"))
         bridgeSync = b
-        Task { await b.configure(log: { [weak self] msg in Task { @MainActor in self?.bridgeStatus = msg } }) }
+        Task {
+            await b.configure(log: { [weak self] msg in Task { @MainActor in self?.bridgeStatus = msg } })
+            await b.setProgressHandler { [weak self] id, f in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.downloading[id] = f
+                    if let i = self.cloudIncoming.firstIndex(where: { $0.id == id }) { self.cloudIncoming[i].fraction = f }
+                    self.reloadLocal()
+                }
+            }
+        }
         return b
     }
 
@@ -559,7 +583,11 @@ public final class PhoneStore: ObservableObject {
         }
         do {
             await bridge.setNarrator(narratorStatus)
+            // Asks for missing books only while on screen and away from the home Mac (there they
+            // come over Wi-Fi). Not asking any more: the sender deletes its copy on the bridge.
+            await bridge.setAsking(isForeground && !atHome)
             try await bridge.syncState()
+            await refreshIncoming(bridge)
             UserDefaults.standard.set(await bridge.settings.voice, forKey: "habla.voice")
             if let name = await bridge.settings.name, name != accountName {
                 accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName")
@@ -581,18 +609,54 @@ public final class PhoneStore: ObservableObject {
             // Away from the paired Mac, books waiting for it go to the best running device instead.
             if !atHome { for id in outbox { await route(id) } }
             // Books narrated elsewhere (either Mac, or this iPhone's earlier work) arrive with audio.
-            if !(try await bridge.receiveBooks()).isEmpty { reloadLocal() }
+            let got = try await bridge.receiveBooks()
+            for id in got { downloading[id] = nil }
+            if !got.isEmpty { try? await bridge.syncState() }          // says "got it": the copy there goes now
+            await refreshIncoming(bridge)
+            if !got.isEmpty { reloadLocal() }
             for id in try await bridge.retarget() where canNarrateOnPhone(id) { narrateOnPhone(id) }
             // On the Mac's Wi-Fi, or any non-mobile network: books this iPhone holds go out.
             try await bridge.publishNewBooks(uploads: onCheapNetwork.value || client != nil)
             try await bridge.collect()
             bridgeSynced = Date()
             if bridgeStatus?.hasPrefix("Cloud sync stopped") == true { bridgeStatus = nil }
+            pollWhileWaiting()
         } catch {
+            for c in cloudIncoming { downloading[c.id] = nil }
             // Offline or a free-tier cap: places stay saved here and go out next time.
             bridgeStatus = "Cloud sync stopped: \(Self.describe(error))"
         }
         reloadLocal()
+    }
+
+    /// What's on its way, for the library (titles once the sender has uploaded them).
+    private func refreshIncoming(_ bridge: BridgeSync) async {
+        let incoming = await bridge.incoming()
+        for (id, m) in incoming { if let m { cloudManifests[id] = m } }
+        let next = incoming.map { CloudIncoming(id: $0.id, title: $0.manifest?.title ?? cloudManifests[$0.id]?.title, fraction: downloading[$0.id]) }
+        if next != cloudIncoming { cloudIncoming = next }
+        if next.isEmpty { waitingSince = nil } else if waitingSince == nil { waitingSince = Date() }
+    }
+
+    /// While a book is on its way and Habla is on screen, look again every few seconds (the Mac
+    /// is uploading it); give up after 15 minutes so a Mac that's off costs nothing.
+    private func pollWhileWaiting() {
+        guard cloudPoll == nil, isForeground, !cloudIncoming.isEmpty,
+              Date().timeIntervalSince(waitingSince ?? Date()) < 15 * 60 else { return }
+        cloudPoll = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 12 * 1_000_000_000)
+            guard let self else { return }
+            self.cloudPoll = nil
+            guard self.isForeground else { return }
+            await self.syncBridge(atHome: self.client != nil, force: true)
+        }
+    }
+
+    /// Habla went to the background (stops asking: the cloud copy of anything not yet
+    /// downloaded is deleted) or came back (asks again).
+    public func setForeground(_ on: Bool) {
+        isForeground = on
+        if !on { cloudPoll?.cancel(); cloudPoll = nil; waitingSince = nil }
     }
 
     private func schedulePush() {
@@ -865,14 +929,20 @@ public final class PhoneStore: ObservableObject {
 extension PhoneStore {
     /// Snapshot/preview support: state that normally comes from the network.
     public func previewState(remote: [LibraryEntry], connection: Connection, lastSync: Date?, downloading: [String: Double] = [:],
-                             paired: PairedMac? = nil, nearby: [ServiceBrowser.Service] = []) {
+                             paired: PairedMac? = nil, nearby: [ServiceBrowser.Service] = [],
+                             cloud: [(BookManifest?, Double)] = []) {
+        self.cloudIncoming = cloud.enumerated().map { i, c in
+            let id = c.0?.id ?? "cloud-\(i)"
+            if let m = c.0 { self.cloudManifests[id] = m; if c.1 > 0 { self.downloading[id] = c.1 } }
+            return CloudIncoming(id: id, title: c.0?.title, fraction: c.1 > 0 ? c.1 : nil)
+        }
         self.homeMac = paired
         self.hasAccount = paired != nil
         self.nearby = nearby
         self.remote = remote
         self.connection = connection
         self.lastSync = lastSync
-        self.downloading = downloading
+        self.downloading.merge(downloading) { _, b in b }
         reloadLocal()
     }
 }

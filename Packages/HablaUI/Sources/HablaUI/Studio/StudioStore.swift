@@ -144,6 +144,7 @@ public final class StudioStore: ObservableObject {
         // Privacy: only paired devices get in; traffic is encrypted and pinned to this Mac.
         registry = DeviceRegistry(fileURL: self.support.appendingPathComponent("devices.json"))
         server.koreaderKeyMD5 = xteinkCredentials().map { KOReaderDigest.filename($0.password) }
+        server.opdsKey = xteinkCredentials().map { LibraryServer.opdsKey(password: $0.password) }
         server.registry = registry
         server.pairing = pairingWindow
         server.libraryID = StudioStore.libraryID()
@@ -339,6 +340,15 @@ public final class StudioStore: ObservableObject {
             for id in try await bridge.retarget() { narrate(id) }      // its narrator went quiet: do it here
             try await bridge.publishNewBooks()
             try await bridge.collect()
+            // Books wait on the bridge only while someone asks: look again soon, so one asked for
+            // by a phone that went quiet (closed, offline) is deleted within minutes.
+            if await bridge.hasBooksInTransit, transitCheck == nil {
+                transitCheck = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 330 * 1_000_000_000)
+                    self?.transitCheck = nil
+                    await self?.runBridge()
+                }
+            }
             helperJobs = await bridge.jobs.count
             bridgeSynced = Date()
             bridgeUsage = try? await bridge.client.usage()
@@ -465,6 +475,14 @@ public final class StudioStore: ObservableObject {
             try await sync.publishNewBooks()
             try await sync.collect()
             helpingJobs[hid] = await sync.jobs.count
+            if await sync.hasBooksInTransit, !helpRechecks.contains(hid) {      // see runBridge
+                helpRechecks.insert(hid)
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 330 * 1_000_000_000)
+                    self?.helpRechecks.remove(hid)
+                    await self?.helpRound(sync, id: hid)
+                }
+            }
         } catch {
             // Offline or a cap: the next round tries again.
         }
@@ -555,6 +573,9 @@ public final class StudioStore: ObservableObject {
     public func bookClosed() { Task { await runBridge() } }
 
     /// A book finished narrating or a setting changed: run the bridge a minute later (coalesced).
+    private var transitCheck: Task<Void, Never>?
+    private var helpRechecks: Set<String> = []
+
     func kickBridge(after seconds: Double = 5) {
         guard bridge != nil, bridgeKick == nil else { return }
         bridgeKick = Task { [weak self] in
@@ -1183,6 +1204,7 @@ public final class StudioStore: ObservableObject {
     func saveXteinkCredentials(_ c: XteinkCredentials) {
         try? JSONEncoder().encode(c).write(to: support.appendingPathComponent("xteink.json"), options: .atomic)
         server.koreaderKeyMD5 = KOReaderDigest.filename(c.password)
+        server.opdsKey = LibraryServer.opdsKey(password: c.password)
     }
 
     /// Ask the watcher to check right away (after an import, a finished narration, "Send now").
@@ -1224,10 +1246,11 @@ public final class StudioStore: ObservableObject {
             let status = try await device.status()
             let name = "Xteink \(status.device ?? "")".trimmingCharacters(in: .whitespaces)
             var creds = xteinkCredentials() ?? XteinkCredentials(username: "habla", password: String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)).lowercased())
-            if creds.configuredFor != macURL.absoluteString {
+            let target = macURL.absoluteString + "#keyed"   // set up before the catalog had a key: redo once
+            if creds.configuredFor != target {
                 xteink = .working("Setting up \(name)…")
                 try await sync.configure(macBaseURL: macURL, username: creds.username, password: creds.password)
-                creds.configuredFor = macURL.absoluteString
+                creds.configuredFor = target
                 saveXteinkCredentials(creds)
             }
             let signature = books.map { "\($0.id)" }.sorted().joined(separator: ",") + "@\(device.host)"

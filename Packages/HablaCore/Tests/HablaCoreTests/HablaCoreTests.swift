@@ -351,6 +351,7 @@ final class KOReaderTests: XCTestCase {
         let m = try bundle.manifest()
         let server = LibraryServer(library: mac, progress: ProgressStore(fileURL: mac.appendingPathComponent("p.json")))
         server.koreaderKeyMD5 = KOReaderDigest.filename("secret")   // MD5("secret")
+        server.opdsKey = LibraryServer.opdsKey(password: "secret")
         server.allowEReaders = true
         let port = try await server.start(port: 0, advertise: false)
         defer { server.stop() }
@@ -400,11 +401,14 @@ final class KOReaderTests: XCTestCase {
         XCTAssertEqual(put2, 200)
         XCTAssertEqual(server.progress.position(for: m.id)?.deviceID, "koreader:Xteink X4")
 
-        // OPDS lists the original and serves it byte-for-byte.
-        let (feed, _) = try await URLSession.shared.data(from: base.appendingPathComponent("opds"))
+        // OPDS: nothing without the key; with it, lists the original and serves it byte-for-byte.
+        let (_, open) = try await URLSession.shared.data(from: base.appendingPathComponent("opds"))
+        XCTAssertEqual((open as! HTTPURLResponse).statusCode, 404)
+        let key = LibraryServer.opdsKey(password: "secret")
+        let (feed, _) = try await URLSession.shared.data(from: base.appendingPathComponent("opds/\(key)"))
         let xml = String(decoding: feed, as: UTF8.self)
         XCTAssertTrue(xml.contains("A Test Novel") && xml.contains("application/epub+zip"))
-        let (epub, resp) = try await URLSession.shared.data(from: base.appendingPathComponent("opds/books/\(m.id).epub"))
+        let (epub, resp) = try await URLSession.shared.data(from: base.appendingPathComponent("opds/\(key)/books/\(m.id).epub"))
         XCTAssertEqual(epub, Fixtures.sampleEPUB())
         XCTAssertEqual((resp as! HTTPURLResponse).statusCode, 200)
     }
@@ -437,10 +441,10 @@ final class XteinkTests: XCTestCase {
         let sync = XteinkSync(device: device)
 
         // One-time setup: sync settings + OPDS feed, idempotent.
-        let mac = URL(string: "http://192.168.1.20:8787")!
+        let mac = URL(string: "http://10.0.0.20:8787")!
         try await sync.configure(macBaseURL: mac, username: "habla", password: "pw")
         try await sync.configure(macBaseURL: mac, username: "habla", password: "pw")
-        XCTAssertEqual(fake.settings["koServerUrl"] as? String, "http://192.168.1.20:8787")
+        XCTAssertEqual(fake.settings["koServerUrl"] as? String, "http://10.0.0.20:8787")
         XCTAssertEqual(fake.settings["koSyncOnSleep"] as? Int, 1)
         XCTAssertEqual(fake.settings["koMatchMethod"] as? Int, 1)
         XCTAssertEqual(fake.opds.count, 1, "OPDS server added once")
@@ -461,14 +465,14 @@ final class XteinkTests: XCTestCase {
         XCTAssertEqual(fake.files[delivered.key], Fixtures.sampleEPUB())
 
         // The Mac's address changed: the same catalog entry is updated, never duplicated.
-        try await sync.configure(macBaseURL: URL(string: "http://192.168.1.33:8787")!, username: "habla", password: "pw")
+        try await sync.configure(macBaseURL: URL(string: "http://10.0.0.33:8787")!, username: "habla", password: "pw")
         XCTAssertEqual(fake.opds.count, 1)
-        XCTAssertEqual(fake.opds[0]["url"] as? String, "http://192.168.1.33:8787/opds")
+        XCTAssertEqual(fake.opds[0]["url"] as? String, "http://10.0.0.33:8787/opds/\(LibraryServer.opdsKey(password: "pw"))")
         // A full catalog list never blocks setup.
         for i in 0..<7 { fake.opds.append(["index": fake.opds.count, "name": "Other \(i)", "url": "http://x/\(i)"]) }
         fake.opds.remove(at: 0)
-        try await sync.configure(macBaseURL: URL(string: "http://192.168.1.44:8787")!, username: "habla", password: "pw")
-        XCTAssertEqual(fake.settings["koServerUrl"] as? String, "http://192.168.1.44:8787")
+        try await sync.configure(macBaseURL: URL(string: "http://10.0.0.44:8787")!, username: "habla", password: "pw")
+        XCTAssertEqual(fake.settings["koServerUrl"] as? String, "http://10.0.0.44:8787")
     }
 
     func testAppUpdateParsesGitHubRelease() {
@@ -609,7 +613,7 @@ final class XteinkTests: XCTestCase {
     }
 
     func testPairingInviteRoundTrip() {
-        let inv = PairingInvite(libraryID: "abc", name: "Habla on Mac", address: "192.168.1.2:8787",
+        let inv = PairingInvite(libraryID: "abc", name: "Habla on Mac", address: "10.0.0.2:8787",
                                 fingerprint: String(repeating: "c", count: 64), code: "ABCDE-FGH12")
         XCTAssertEqual(PairingInvite(url: inv.url), inv)
         XCTAssertNil(PairingInvite(url: URL(string: "habla://pair?id=x")!))

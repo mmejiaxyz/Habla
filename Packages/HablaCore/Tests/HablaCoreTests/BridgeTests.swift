@@ -107,7 +107,7 @@ final class BridgeTests: XCTestCase {
         let dir = library.deletingLastPathComponent()
         let progress = ProgressStore(fileURL: dir.appendingPathComponent("progress.json"))
         let markers = MarkerStore(fileURL: dir.appendingPathComponent("markers.json"), deviceID: id)
-        let sync = BridgeSync(config: BridgeConfig(url: url, libraryKey: key), deviceID: id, deviceName: "Manuel’s \(role)",
+        let sync = BridgeSync(config: BridgeConfig(url: url, libraryKey: key), deviceID: id, deviceName: "Sam’s \(role)",
                               role: role, progress: progress, markers: markers, library: library,
                               stateURL: dir.appendingPathComponent("bridge-state.json"), session: FakeBridge.session())
         return (sync, progress, markers)
@@ -121,7 +121,8 @@ final class BridgeTests: XCTestCase {
         let (mac, macProgress, macMarkers) = device("mac-1", .mac, library: macLib)
         let (phone, phoneProgress, phoneMarkers) = device("iphone-1", .phone, library: phoneLib)
 
-        // The phone announces itself; the Mac sees it and sends the book.
+        // The Mac lists the book, the phone asks for it, the Mac sends it.
+        try await mac.syncState()
         try await phone.syncState()
         try await mac.syncState()
         let sent = try await mac.publishNewBooks()
@@ -161,7 +162,7 @@ final class BridgeTests: XCTestCase {
         // Cloudflare saw no title, author, id, device name, text or key.
         let blobs = FakeBridge.lock.withLock { FakeBridge.objects.values.map(\.data) }
         let traffic = Data(FakeBridge.lock.withLock { FakeBridge.seen.joined(separator: "\n") }.utf8)
-        let secrets = [m.title, m.author, m.id, "Manuel", "iphone-1", "mac-1", "Darcy", "Plain & simple", "Chapter I"]
+        let secrets = [m.title, m.author, m.id, "Sam", "iphone-1", "mac-1", "Darcy", "Plain & simple", "Chapter I"]
             .filter { !$0.isEmpty }.map { Data($0.utf8) } + [key, key.base64EncodedData()]
         for s in secrets {
             for b in blobs + [traffic] { XCTAssertNil(b.range(of: s), "leaked: \(String(decoding: s, as: UTF8.self))") }
@@ -184,6 +185,7 @@ final class BridgeTests: XCTestCase {
         try FileManager.default.createDirectory(at: phoneLib, withIntermediateDirectories: true)
         let (mac, _, _) = device("mac-1", .mac, library: macLib)
         let (phone, _, _) = device("iphone-1", .phone, library: phoneLib)
+        try await mac.syncState()
         try await phone.syncState()
         try await mac.syncState()
 
@@ -276,6 +278,7 @@ final class BridgeTests: XCTestCase {
 
         // It narrated a job: the phone gets it; once collected the helper lets it go.
         await helper.recordJobForTest(m.id)
+        try await helper.syncState(); try await phone.syncState(); try await helper.syncState()   // the phone asks
         let sent = try await helper.publishNewBooks()
         XCTAssertEqual(sent, [m.id])
         try await phone.syncState()

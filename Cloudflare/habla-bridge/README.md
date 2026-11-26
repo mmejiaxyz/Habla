@@ -4,11 +4,12 @@ Cloudflare Worker + R2 bucket + D1 ledger: an encrypted mailbox between your Hab
 It never sees a key, a title or a word; it checks a token hash, keeps the account inside the
 free tier, and moves sealed bytes. Design and caps: `Docs/cloud-bridge.md`.
 
-Deployed at `https://habla-bridge.embeddings-door.workers.dev` (bucket `habla-bridge`,
-D1 `habla-bridge-ledger`, daily cron 03:17 UTC).
+Bucket `habla-bridge`, D1 `habla-bridge-ledger`, daily cron 03:17 UTC. The live address and
+database id stay out of the repo: `wrangler.toml` is local only (start from `wrangler.example.toml`).
 
 ## Provision from scratch
 ```sh
+cp wrangler.example.toml wrangler.toml
 wrangler r2 bucket create habla-bridge
 wrangler d1 create habla-bridge-ledger           # put the id in wrangler.toml
 wrangler d1 execute habla-bridge-ledger --remote --file schema.sql

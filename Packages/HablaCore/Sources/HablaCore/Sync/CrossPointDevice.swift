@@ -220,7 +220,7 @@ public struct XteinkSync {
         ])
         // The catalog is a convenience: never let it block setup. The device keeps at most
         // 8 servers, so reuse (update) our entry when the Mac's address changes.
-        let opds = macBaseURL.appendingPathComponent("opds").absoluteString
+        let opds = macBaseURL.appendingPathComponent("opds").appendingPathComponent(LibraryServer.opdsKey(password: password)).absoluteString
         if let servers = try? await device.opdsServers(), !servers.contains(where: { $0.url == opds }) {
             if let mine = servers.first(where: { $0.name == Self.catalogName }), let i = mine.index {
                 try? await device.updateOPDSServer(index: i, name: Self.catalogName, url: opds)

@@ -155,8 +155,11 @@ async function list(env, request, space, kind) {
     ...(r.seen ? { seen: new Date(r.seen).toISOString() } : {}), ...(live.has(r.name) ? { online: true } : {}) })));
 }
 
+// The daily request cap counts only requests that get past the checks below: junk from
+// someone who found the URL is refused without spending the account's day.
+const dailyCap = (env) => take(env, day(), 'requests', num(env, 'REQUESTS_CAP_DAY'));
+
 async function handle(request, env) {
-  if (!(await take(env, day(), 'requests', num(env, 'REQUESTS_CAP_DAY')))) return fail(429, 'daily request cap reached', 'requests');
   const url = new URL(request.url);
   const parts = url.pathname.split('/').filter(Boolean);                   // ["v1", "state", name?]
   if (parts[0] !== 'v1') return fail(404, 'not found');
@@ -167,6 +170,7 @@ async function handle(request, env) {
       if (!env.ENROLL_SECRET) return fail(503, 'enrollment not configured');
       if (!sameSecret(request.headers.get('x-habla-enroll') ?? '', env.ENROLL_SECRET)) return fail(403, 'forbidden');
     }
+    if (!(await dailyCap(env))) return fail(429, 'daily request cap reached', 'requests');
     let body;
     try { body = await request.json(); } catch { return fail(400, 'bad json'); }
     if (!/^[0-9a-f]{64}$/.test(body?.tokenHash ?? '')) return fail(400, 'bad token hash');
@@ -187,6 +191,7 @@ async function handle(request, env) {
   if (!auth.startsWith('Bearer ') || auth.length < 20) return fail(401, 'unauthorized');
   const space = await sha256hex(auth.slice(7));
   if (!(await env.DB.prepare('SELECT 1 AS ok FROM spaces WHERE id = ?1').bind(space).first())) return fail(401, 'unauthorized');
+  if (!(await dailyCap(env))) return fail(429, 'daily request cap reached', 'requests');
 
   if (parts[1] === 'usage' && parts.length === 2 && request.method === 'GET') return json(await usage(env));
   if (parts[1] === 'invites' && parts.length === 2 && request.method === 'POST') {
