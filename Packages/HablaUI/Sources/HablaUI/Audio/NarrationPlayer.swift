@@ -21,7 +21,8 @@ public final class NarrationPlayer: ObservableObject {
     @Published public private(set) var isPlaying = false
     @Published public internal(set) var message: String?
     @Published public var rate: Double = UserDefaults.standard.object(forKey: "habla.rate") as? Double ?? 1.0 {
-        didSet { UserDefaults.standard.set(rate, forKey: "habla.rate"); if isPlaying { player?.rate = Float(rate) }; updateNowPlaying() }
+        // Not during the break between chapters: setting the rate would start the next one early.
+        didSet { UserDefaults.standard.set(rate, forKey: "habla.rate"); if isPlaying && breakTask == nil { player?.rate = Float(rate) }; updateNowPlaying() }
     }
     /// Minutes left on the sleep timer, or -1 for "end of chapter".
     @Published public private(set) var sleepTimer: Int?
@@ -224,15 +225,17 @@ public final class NarrationPlayer: ObservableObject {
         sleepTask?.cancel()
         sleepTimer = minutes
         guard let m = minutes, m > 0 else { return }
+        // Counts listening time only: paused minutes don't use up the timer.
         sleepTask = Task { [weak self] in
-            var left = m
+            var left = m * 60
             while left > 0 {
-                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
                 if Task.isCancelled { return }
+                guard let self, self.isPlaying else { continue }
                 left -= 1
-                await MainActor.run { self?.sleepTimer = left > 0 ? left : nil }
+                if left % 60 == 0 { self.sleepTimer = left > 0 ? left / 60 : nil }
             }
-            await MainActor.run { self?.pause() }
+            self?.pause()
         }
     }
 
@@ -268,7 +271,8 @@ public final class NarrationPlayer: ObservableObject {
 
     private func chapterEnded() {
         if sleepTimer == -1 { sleepTimer = nil; pause(); return }
-        guard let next = nextReady() else {
+        // The next chapter isn't narrated yet: stop here rather than silently skipping it.
+        guard let next = nextReady(), !nextIsPending(before: next) else {
             isPlaying = false
             time = duration
             message = manifest?.chapters.contains(where: { $0.index > chapter && $0.audioStatus == .pending }) == true
@@ -281,6 +285,7 @@ public final class NarrationPlayer: ObservableObject {
         save(force: true)
         // Still "playing" during the break, so the controls don't flicker to paused.
         isPlaying = true
+        updateNowPlaying()                                   // lock screen: still playing during the break
         breakTask?.cancel()
         breakTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(Self.chapterBreak * 1_000_000_000))
@@ -290,6 +295,10 @@ public final class NarrationPlayer: ObservableObject {
         }
     }
 
+    /// A chapter between this one and `next` is still waiting for its narration.
+    private func nextIsPending(before next: ChapterInfo) -> Bool {
+        manifest?.chapters.contains { $0.index > chapter && $0.index < next.index && $0.audioStatus == .pending } == true
+    }
     private func nextReady() -> ChapterInfo? { manifest?.chapters.first { $0.index > chapter && $0.audioStatus == .ready } }
     private func previousReady() -> ChapterInfo? { manifest?.chapters.last { $0.index < chapter && $0.audioStatus == .ready } }
 

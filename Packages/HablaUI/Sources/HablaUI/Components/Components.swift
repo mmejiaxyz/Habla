@@ -417,9 +417,18 @@ public struct DownloadVeil: View {
 /// that moves (a sweep until the first bytes arrive).
 public struct CloudIncomingBanner: View {
     var items: [PhoneStore.CloudIncoming]
+    /// The user said yes to downloading the books waiting for Wi-Fi over mobile data.
+    var onMobileDownload: (([String]) -> Void)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sweep = false
-    public init(items: [PhoneStore.CloudIncoming]) { self.items = items }
+    @State private var confirming = false
+    public init(items: [PhoneStore.CloudIncoming], onMobileDownload: (([String]) -> Void)? = nil) {
+        self.items = items; self.onMobileDownload = onMobileDownload
+    }
+
+    var held: [PhoneStore.CloudIncoming] { items.filter(\.waitsForWiFi) }
+    var heldBytes: Int { held.reduce(0) { $0 + ($1.bytes ?? 0) } }
+    var heldSize: String { ByteCountFormatter.string(fromByteCount: Int64(heldBytes), countStyle: .file) }
 
     var started: [PhoneStore.CloudIncoming] { items.filter { ($0.fraction ?? 0) > 0 } }
     var overall: Double { started.isEmpty ? 0 : items.reduce(0) { $0 + ($1.fraction ?? 0) } / Double(items.count) }
@@ -432,6 +441,35 @@ public struct CloudIncomingBanner: View {
     }
 
     public var body: some View {
+        if !held.isEmpty && held.count == items.count { waitingForWiFi } else { downloading }
+    }
+
+    /// On mobile data: the books wait for Wi-Fi unless the user says yes.
+    var waitingForWiFi: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "wifi").font(.system(size: 18)).foregroundStyle(Theme.accentText).frame(width: 26)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(held.count == 1 ? "“\(held[0].title ?? "A book")” is waiting for Wi-Fi" : "\(held.count) books are waiting for Wi-Fi")
+                    .font(.ui(15, weight: .medium)).foregroundStyle(Theme.text).lineLimit(2)
+                Text(heldBytes > 0 ? "\(heldSize) · it comes in once you’re on Wi-Fi" : "It comes in once you’re on Wi-Fi")
+                    .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).lineLimit(2)
+            }
+            Spacer(minLength: 0)
+            if onMobileDownload != nil {
+                Button("Download now") { confirming = true }
+                    .font(.ui(14, weight: .semibold)).foregroundStyle(Theme.accentText)
+            }
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Theme.surface))
+        .confirmationDialog(heldBytes > 0 ? "Download \(heldSize) over mobile data?" : "Download over mobile data?",
+                            isPresented: $confirming, titleVisibility: .visible) {
+            Button("Download now") { onMobileDownload?(held.map(\.id)) }
+            Button("Wait for Wi-Fi", role: .cancel) {}
+        }
+    }
+
+    var downloading: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 ProgressRing(value: overall, color: Theme.accentText, lineWidth: 2.5).frame(width: 26, height: 26)

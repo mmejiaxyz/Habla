@@ -151,6 +151,12 @@ struct ContentExtractor {
             let types = (n.attr("epub:type") ?? "").lowercased().split(separator: " ").map(String.init)
             if types.contains(where: ContentExtractor.skipEpubTypes.contains) { return true }
             if let role = n.attr("role")?.lowercased(), ContentExtractor.skipRoles.contains(role) { return true }
+            // Footnote blocks marked only by class (many EPUBs have no epub:type): same as above.
+            if ["aside", "div", "section", "p", "ol", "ul", "li", "dl"].contains(n.localName),
+               let cls = n.attr("class")?.lowercased(),
+               cls.split(whereSeparator: { $0 == " " }).contains(where: { ["footnote", "footnotes", "endnote", "endnotes"].contains($0) }) {
+                return true
+            }
             if n.attr("hidden") != nil || (n.attr("style") ?? "").replacingOccurrences(of: " ", with: "").contains("display:none") {
                 return true
             }

@@ -368,7 +368,7 @@ public struct StudioWindowView: View {
             return "Narrating “\(r.chapterTitle)” · sentence \(r.sentence) of \(r.sentenceCount)\(eta)"
         }
         if !m.canNarrate { return "Text only · no \(BookLanguage.name(m.language)) voice yet" }
-        if store.queue.contains(m.id) { return store.paused ? "Paused" : (store.voiceEngine == .ready ? "Waiting for another book" : "Waiting for the voice engine") }
+        if store.queue.contains(m.id) { return store.paused ? (store.pauseReason.map { "Paused: \($0)" } ?? "Paused") : (store.voiceEngine == .ready ? "Waiting for another book" : "Waiting for the voice engine") }
         if item.isFullyNarrated { return "\(Format.duration(m.totalDuration)) · \(voiceName(store.voice(for: m)))" }
         return "Not narrated yet — you can still read it"
     }
@@ -379,14 +379,25 @@ public struct StudioWindowView: View {
         if !m.canNarrate {
             EmptyView()
         } else if active && !store.paused {
-            pill("Pause") { store.pauseNarration() }
+            HStack(spacing: 8) {
+                pill("Pause") { store.pauseNarration() }
+                pill("Cancel", filled: false) { store.cancelNarration(m.id) }
+                    .help("Stop narrating this book and take it out of the queue")
+            }
         } else if queued && store.paused {
-            pill("Resume") { store.resumeNarration(m.id) }
+            HStack(spacing: 8) {
+                pill("Resume") { store.resumeNarration(m.id) }
+                pill("Cancel", filled: false) { store.cancelNarration(m.id) }
+                    .help("Take this book out of the queue")
+            }
         } else if queued {
             pill("Cancel", filled: false) { store.cancelNarration(m.id) }
         } else if !item.isFullyNarrated {
             pill(item.narrated > 0 ? "Continue" : "Narrate") { store.narrate(m.id) }.disabled(store.voiceEngine != .ready)
                 .help(store.voiceEngine == .ready ? "Narrate this book with the selected voice" : "Install the voice engine first (banner above)")
+        } else if m.silentSentences > 0 {
+            pill("Retry silent parts", filled: false) { store.retryGaps(m.id) }.disabled(store.voiceEngine != .ready)
+                .help("\(m.silentSentences) sentence\(m.silentSentences == 1 ? "" : "s") couldn't be voiced and \(m.silentSentences == 1 ? "is" : "are") a short silence. Try again.")
         } else if store.canRenarrate(m) {
             pill("Re-narrate with Kokoro", filled: false) { store.renarrate(m.id) }.disabled(store.voiceEngine != .ready)
                 .help("This book was narrated with Paradee. Its audio keeps playing until each chapter is redone.")

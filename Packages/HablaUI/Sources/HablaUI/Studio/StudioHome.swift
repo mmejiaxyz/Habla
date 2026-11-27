@@ -143,6 +143,7 @@ extension StudioWindowView {
                 HStack(spacing: 10) {
                     Text(narratingOnly ? "Narrating" : "Library").font(Theme.display(46)).foregroundStyle(Theme.text)
                     Spacer()
+                    StudioActivityButton(store: store)
                     RoundIconButton("plus", label: "Add books") { showImporter = true }
                         .help("Add EPUB books")
                 }

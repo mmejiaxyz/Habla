@@ -45,6 +45,7 @@ public struct PhoneRoot: View {
                     .toolbar(.hidden)
                 }
         }
+        .overlay(alignment: .bottom) { toastView }
         .preferredColorScheme(.light)
         #if os(iOS)
         .fullScreenCover(item: $cover, onDismiss: { saveReaderIfNeeded(); store.bookClosed() }) { c in
@@ -108,6 +109,28 @@ public struct PhoneRoot: View {
         .alert("Habla", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
             Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
+    }
+
+    @ViewBuilder var toastView: some View {
+        if let t = store.toast {
+            HStack(spacing: 14) {
+                Text(t.text).font(.ui(14)).foregroundStyle(Theme.paper).lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let label = t.undoLabel {
+                    Button(label) { store.undoToast() }.font(.ui(14, weight: .semibold)).foregroundStyle(Theme.accent)
+                }
+            }
+            .padding(.horizontal, 18).padding(.vertical, 14)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.ink))
+            .padding(.horizontal, 16).padding(.bottom, 96)       // above the tab bar
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .id(t.id)
+            .task(id: t.id) {
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                if store.toast?.id == t.id { withAnimation { store.toast = nil } }
+            }
+            .accessibilityElement(children: .combine)
+        }
     }
 
     var playerScreen: some View {

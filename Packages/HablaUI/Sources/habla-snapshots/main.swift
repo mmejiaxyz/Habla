@@ -101,6 +101,25 @@ let readerPageHeight = phone.height - deviceInsets.top - deviceInsets.bottom - 7
     cloudStore.previewState(remote: [], connection: .searching, lastSync: nil, cloud: [(arriving, 0.62), (nil, 0)])
     render("p13-cloud-download", PhoneLibraryView(store: cloudStore, player: NarrationPlayer(), open: { _ in }))
 
+    // Activity: the strip on the Library and the sheet (Figma 21 / 22).
+    let others = Array(manifests.prefix(4))
+    func m(_ i: Int) -> BookManifest { others[min(i, others.count - 1)] }
+    store.previewActivity(events: [
+        ActivityItem(id: "get-" + m(0).id, bookID: m(0).id, title: m(0).title, kind: .getting, state: .running(0.42), route: "Wi-Fi · from MacBook Pro"),
+        ActivityItem(id: "get-x", bookID: m(2).id, title: m(2).title, kind: .getting,
+                     state: .failed("The connection dropped. What arrived is kept; it picks up from there."), route: "Cloud"),
+        ActivityItem(id: "send-" + m(3).id, bookID: m(3).id, title: m(3).title, kind: .sending, state: .done, route: "Cloud"),
+    ], narratingOn: [m(1).id: "MacBook Pro"], pausedUntil: Calendar.current.date(byAdding: .day, value: 4, to: Date()),
+       waitingForWiFi: [(m(2), 240_000_000)])
+    render("p14-library-activity", PhoneLibraryView(store: store, player: player, open: { _ in }), device: true)
+    // (ImageRenderer can't draw a ScrollView: the sheet's contents, laid out the same way.)
+    render("p15-activity-sheet", VStack(alignment: .leading, spacing: 0) {
+        Text("Activity").font(Theme.display(34)).foregroundStyle(Theme.text)
+        Text("Everything moving between your devices").font(Theme.grotesk(13)).foregroundStyle(Theme.textDim)
+        ActivityList(store.activitySnapshot)
+        Spacer(minLength: 0)
+    }.padding(.horizontal, 24).padding(.top, 24).background(Theme.paper), size: CGSize(width: 390, height: 1000))
+
     // Reader pages: compute the page size the way ReaderView does on a phone.
     func reader(_ name: String, _ theme: ReaderTheme, chrome: Bool, chapter: Int, sentence: Int?, highlight: Bool, size: CGFloat = 19) {
         let model = ReaderModel(bundle: mb, manifest: main.1, chapter: chapter, sentence: sentence, style: ReaderStyle(theme: theme, fontSize: size))
@@ -138,6 +157,11 @@ let readerPageHeight = phone.height - deviceInsets.top - deviceInsets.bottom - 7
                         xteink: .done("4 books on Xteink X4 · up to date"), server: "10.0.0.20:8787")
     render("m1-studio", StudioWindowView(store: studio, installScript: URL(fileURLWithPath: "/tmp/install.sh"), openReader: { _ in }), size: mac, scale: 2)
     if let o = other { studio.selection = o.id }
+    render("m5-activity-popover", VStack(alignment: .leading, spacing: 0) {
+        Text("Activity").font(Theme.display(24)).foregroundStyle(Theme.text)
+        ActivityList(studio.activitySnapshot, showDevices: true)
+        Spacer(minLength: 0)
+    }.padding(20).background(Theme.paper), size: CGSize(width: 400, height: 560), scale: 2)
     render("m2-studio-narrating", StudioWindowView(store: studio, installScript: nil, openReader: { _ in }), size: mac, scale: 2)
     let emptyStudio = StudioStore(support: makeRoot("studio-empty", books: []))
     emptyStudio.previewState(render: nil, queue: [], phoneLastSeen: nil, xteink: .looking, server: "10.0.0.20:8787")

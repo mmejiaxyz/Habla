@@ -51,7 +51,7 @@ public final class RenderPipeline: @unchecked Sendable {
     /// book can already sync and play.
     /// `replaceOtherModels`: also redo chapters another voice model narrated (Re-narrate).
     public func render(_ bundle: BookBundle, voice: VoiceInfo, only chapterIndices: Set<Int>? = nil,
-                       replaceOtherModels: Bool = false,
+                       replaceOtherModels: Bool = false, retryGaps: Bool = false,
                        progress: (@Sendable (RenderProgress) -> Void)? = nil) async throws {
         var manifest = try bundle.manifest()
         if manifest.voice != voice {
@@ -64,7 +64,7 @@ public final class RenderPipeline: @unchecked Sendable {
         }
 
         let model = replaceOtherModels ? engine.modelDescription : nil
-        let todo = manifest.chaptersToNarrate(voiceID: voice.voiceID, model: model).filter { chapterIndices?.contains($0.index) ?? true }
+        let todo = manifest.chaptersToNarrate(voiceID: voice.voiceID, model: model, retryGaps: retryGaps).filter { chapterIndices?.contains($0.index) ?? true }
         for (n, info) in todo.enumerated() {
             try Task.checkCancellation()
             let text = try bundle.chapterText(info)
@@ -72,7 +72,7 @@ public final class RenderPipeline: @unchecked Sendable {
             // plan changes what is said (a missing spoken title). Otherwise stamp it and move on,
             // so the iPhone never re-downloads audio that is identical.
             if info.audioStatus == .ready, (info.voiceID ?? manifest.voice?.voiceID) == voice.voiceID,
-               !info.madeBy(otherThan: model),
+               !info.madeBy(otherThan: model), !(retryGaps && info.hasGaps),
                !titleChangesAudio(text, language: manifest.language) {
                 manifest = try bundle.manifest()
                 if let i = manifest.chapters.firstIndex(where: { $0.index == info.index }) {
@@ -86,6 +86,7 @@ public final class RenderPipeline: @unchecked Sendable {
             let timingPath = BookBundle.timingPath(info.index)
             guard FileManager.default.fileExists(atPath: bundle.url.path) else { throw CancellationError() }
 
+            let silentBefore = skippedSentences
             let writer = AudioAssembler.Writer(assembler: assembler, url: bundle.fileURL(audioPath))
             // Voice a few sentences ahead (in parallel on an engine pool); write them in order.
             var ahead: [Int: Task<(SpeechAudio, Bool), Error>] = [:]
@@ -134,6 +135,8 @@ public final class RenderPipeline: @unchecked Sendable {
                 manifest.chapters[i].voiceID = voice.voiceID
                 manifest.chapters[i].model = engine.modelDescription
                 manifest.chapters[i].planVersion = BookManifest.currentPlanVersion
+                let silent = skippedSentences - silentBefore
+                manifest.chapters[i].silentSentences = silent > 0 ? silent : nil
             }
             manifest = try bundle.commit(manifest)
             pruneCache()

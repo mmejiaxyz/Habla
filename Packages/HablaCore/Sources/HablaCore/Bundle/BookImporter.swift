@@ -26,10 +26,24 @@ public struct BookImporter {
         "uncopyright", "halftitle", "half-title", "nav", "cover", "loi", "endnotes", "acknowledg",
     ]
 
+    /// Whether a file name names a non-story page. Whole words only ("cover1.xhtml", "title-page",
+    /// "toc.xhtml"), so story files such as "chapter_discovery" or "Navarro" aren't caught.
+    static func isFrontMatterFileName(_ name: String) -> Bool {
+        let base = ((name as NSString).deletingPathExtension).lowercased()
+        let words = base.split { !$0.isLetter }.map(String.init)
+        var candidates = Set(words)
+        for i in words.indices.dropLast() { candidates.insert(words[i] + words[i + 1]) }   // title-page → titlepage
+        let names = Set(frontMatterNames.map { $0.replacingOccurrences(of: "-", with: "") })
+        return !candidates.isDisjoint(with: names) || words.contains { $0.hasPrefix("acknowledg") }
+    }
+
     /// Lowercased title prefixes that mark non-story pages.
     static let frontMatterTitles = [
         "copyright", "contents", "table of contents", "title page", "also by", "other books by",
         "books by", "imprint", "colophon", "uncopyright", "front matter",
+        "dedication", "acknowledgment", "acknowledgement", "about the author", "about the publisher",
+        "praise for", "advance praise", "a note on the type", "also available", "newsletter", "sign up",
+        "agradecimientos", "dedicatoria", "sobre el autor", "acerca del autor",
         // Spanish, German, Russian, Ukrainian
         "índice", "indice", "contenido", "créditos", "derechos", "inhalt", "inhaltsverzeichnis", "impressum",
         "содержание", "оглавление", "выходные данные", "зміст", "вихідні дані",
@@ -90,7 +104,7 @@ public struct BookImporter {
             let isFront = !spineItem.linear
                 || item.properties.contains("nav")
                 || !result.structuralTypes.isDisjoint(with: Self.frontMatterTypes)
-                || Self.frontMatterNames.contains { (lowerHref as NSString).lastPathComponent.contains($0) }
+                || Self.isFrontMatterFileName((lowerHref as NSString).lastPathComponent)
 
             let tocTitle = tocTitles[item.href]
             let words = result.blocks.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }

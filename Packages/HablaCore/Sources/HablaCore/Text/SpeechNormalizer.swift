@@ -34,6 +34,20 @@ public struct SpeechNormalizer {
         s = replace(s, #"\b(Chapter|CHAPTER|Book|BOOK|Part|PART|Volume|VOLUME|Act|ACT|Scene|SCENE|Canto|CANTO)\s+([IVXLCDM]+)\b\.?"#) { m in
             "\(m[1]) \(m[2] == "I" ? "one" : (Self.romanToInt(m[2]).map(Self.cardinal) ?? m[2]))"
         }
+        // Regnal and war numbers after a name: "Henry VIII" → "Henry the Eighth", "World War II" →
+        // "World War Two". Only II–XXXIX (X, V, I): "I" is the pronoun, "CD"/"MD"/"CIVIL" aren't numbers.
+        s = replace(s, #"\b([A-Z][a-z]+)\s+(X{0,3}(?:IX|IV|V?I{0,3}))\b(?![a-z'’])"#) { m in
+            guard m[2].count >= 2, let n = Self.romanToInt(m[2]), n >= 2 else { return m[0] }
+            if m[1] == "War" { return "War \(Self.cardinal(n))" }
+            return "\(m[1]) the \(Self.ordinal(n).capitalized)"
+        }
+
+        // Initials: "J. R. R. Tolkien", "U.S." don't end a sentence (the voice paused at each dot).
+        s = replace(s, #"\b(?:[A-Z]\.\s?){2,}"#) { m in
+            m[0].filter(\.isLetter).map(String.init).joined(separator: " ") + (m[0].hasSuffix(" ") ? " " : "")
+        }
+        s = replace(s, #"\b([A-Z][a-z]+) ([A-Z])\. (?=[A-Z][a-z])"#, "$1 $2 ")
+
         if isHeading {
             // A heading that is only a number ("IV", "I.", "12") is a chapter number.
             let bare = s.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
@@ -81,6 +95,13 @@ public struct SpeechNormalizer {
         (#"\bvs\.(?=\s)"#, "versus"), (#"\betc\."#, "et cetera"), (#"\be\.g\.,?"#, "for example,"),
         (#"\bi\.e\.,?"#, "that is,"), (#"\bNo\.\s*(?=\d)"#, "number "), (#"\bvol\.\s*(?=\d)"#, "volume "),
         (#"\bch\.\s*(?=\d)"#, "chapter "), (#"\bp\.\s*(?=\d)"#, "page "),
+    ]
+
+    static let spanishAbbreviations: [(String, String)] = [
+        (#"\bSr\.(?=\s)"#, "señor"), (#"\bSra\.(?=\s)"#, "señora"), (#"\bSrta\.(?=\s)"#, "señorita"),
+        (#"\bDr\.(?=\s)"#, "doctor"), (#"\bDra\.(?=\s)"#, "doctora"), (#"\bD\.(?=\s+[A-ZÁÉÍÓÚ])"#, "don"),
+        (#"\bDña\.(?=\s)"#, "doña"), (#"\bUd\.(?=[\s,])"#, "usted"), (#"\bUds\.(?=[\s,])"#, "ustedes"),
+        (#"\bpág\.\s*(?=\d)"#, "página "), (#"\betc\."#, "etcétera"),
     ]
 
     // MARK: - Numbers
@@ -162,6 +183,9 @@ public struct SpeechNormalizer {
         s = replace(s, #"\s+–\s+"#, ", ")
         s = replace(s, #",\s*,"#, ",")
         s = replace(s, #"^\s*,\s*"#, "")
+        if language == "es" {
+            for (pattern, replacement) in Self.spanishAbbreviations { s = replace(s, pattern, replacement) }
+        }
         let words = "Capítulo|CAPÍTULO|Parte|PARTE|Libro|LIBRO|Kapitel|KAPITEL|Teil|TEIL|Глава|ГЛАВА|Часть|ЧАСТЬ|Розділ|РОЗДІЛ|Частина|ЧАСТИНА"
         s = replace(s, #"\b("# + words + #")\s+([IVXLCDM]+)\b\.?"#) { m in
             "\(m[1]) \(m[2] == "I" ? "1" : (Self.romanToInt(m[2]).map(String.init) ?? m[2]))"

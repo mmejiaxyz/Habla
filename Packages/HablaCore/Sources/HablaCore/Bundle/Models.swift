@@ -47,9 +47,12 @@ public struct BookManifest: Codable, Equatable, Sendable {
     /// or narrated with an older narration plan (a spoken title / chapter break is missing).
     /// `model`: re-narrating with this voice model, so chapters another model made are redone too
     /// (chapters without a recorded model are older Kokoro audio and stay).
-    public func chaptersToNarrate(voiceID: String, model: String? = nil) -> [ChapterInfo] {
+    /// `retryGaps`: also redo chapters where a sentence couldn't be voiced and was left silent
+    /// (only when the user asks, so a sentence that always fails can't loop the queue).
+    public func chaptersToNarrate(voiceID: String, model: String? = nil, retryGaps: Bool = false) -> [ChapterInfo] {
         chapters.filter { c in
             c.audioStatus == .pending
+                || (retryGaps && c.audioStatus == .ready && c.hasGaps)
                 || (c.audioStatus == .ready && ((c.voiceID ?? voice?.voiceID) != voiceID
                                                 || (c.planVersion ?? 0) < BookManifest.currentPlanVersion
                                                 || c.madeBy(otherThan: model)))
@@ -57,6 +60,9 @@ public struct BookManifest: Codable, Equatable, Sendable {
     }
 
     /// Chapters with audio from a model other than `model` (e.g. Paradee, once Kokoro is back).
+    /// Sentences left silent because the voice engine couldn't voice them.
+    public var silentSentences: Int { chapters.reduce(0) { $0 + ($1.audioStatus == .ready ? $1.silentSentences ?? 0 : 0) } }
+
     public func narrated(byOtherThan model: String) -> Bool {
         chapters.contains { $0.audioStatus == .ready && $0.madeBy(otherThan: model) }
     }
@@ -93,6 +99,10 @@ public struct ChapterInfo: Codable, Equatable, Sendable {
     public var model: String? = nil
     /// The narration plan that made this chapter's audio (nil in older bundles → re-narrate).
     public var planVersion: Int? = nil
+    /// Sentences the voice engine couldn't voice, left as a short silence (nil/0: none).
+    public var silentSentences: Int? = nil
+
+    public var hasGaps: Bool { (silentSentences ?? 0) > 0 }
 
     /// Audio another voice model made (nil `model` on either side: no claim, keep it).
     func madeBy(otherThan model: String?) -> Bool {

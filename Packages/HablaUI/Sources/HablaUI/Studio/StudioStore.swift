@@ -50,9 +50,26 @@ public final class StudioStore: ObservableObject {
     @Published public private(set) var importing: [String] = []
     @Published public var alert: String?
     @Published public private(set) var render: RenderState?
-    @Published public private(set) var queue: [String] = []
+    /// Books moving through the cloud, newest first (for the Activity popover).
+    @Published public private(set) var activityEvents: [ActivityItem] = []
+    /// Which running device narrates each book.
+    @Published public private(set) var narratingOn: [String: String] = [:]
+    /// The cloud is paused until this date (a free-tier allowance used up).
+    @Published public private(set) var cloudPausedUntil: Date?
+
+    /// Narration order, kept across launches (the order the user queued books in).
+    @Published public private(set) var queue: [String] = UserDefaults.standard.stringArray(forKey: "habla.queue") ?? [] {
+        didSet { UserDefaults.standard.set(queue, forKey: "habla.queue") }
+    }
     @Published public private(set) var paused: Bool = UserDefaults.standard.bool(forKey: "habla.paused") {
-        didSet { UserDefaults.standard.set(paused, forKey: "habla.paused") }
+        didSet {
+            UserDefaults.standard.set(paused, forKey: "habla.paused")
+            if !paused { pauseReason = nil }
+        }
+    }
+    /// Why narration is paused when Habla paused it (an error), so "Paused" isn't a mystery later.
+    @Published public private(set) var pauseReason: String? = UserDefaults.standard.string(forKey: "habla.pauseReason") {
+        didSet { UserDefaults.standard.set(pauseReason, forKey: "habla.pauseReason") }
     }
     @Published public private(set) var voiceEngine: VoiceEngineState = .checking
     @Published public private(set) var voiceEngineLog: [String] = []
@@ -260,6 +277,7 @@ public final class StudioStore: ObservableObject {
         let registry = registry
         let hidden = hiddenIDs
         bridge = b
+        Task { await b.setActivityHandler { [weak self] item in Task { @MainActor in self?.activityEvents.note(item) } } }
         bridgeLoop = Task { [weak self] in
             _ = registry
             await b.configure(inbox: self?.server.inbox, onEPUB: { file, voice in
@@ -319,6 +337,8 @@ public final class StudioStore: ObservableObject {
         guard let bridge else { return }
         do {
             await bridge.setNarrator(narratorStatus)
+            await bridge.setNarrating(queue + (render.map { [$0.bookID] } ?? []))
+            await bridge.setEndpoints(serverAddress.map { [$0] } ?? [])
             try await bridge.syncState()
             let account = await bridge.settings.voice
             if account != defaultVoice { applyingAccountVoice = true; defaultVoice = account; applyingAccountVoice = false }
@@ -328,15 +348,27 @@ public final class StudioStore: ObservableObject {
                 await bridge.setName(name)                          // named here before the account knew
             }
             accountDevices = await bridge.devices()
+            narratingOn = await bridge.narratingDevices()
+            cloudPausedUntil = await bridge.pausedUntil
             // Deleted on another device: deleted here too.
             for id in await bridge.booksDeletedElsewhere() { delete(id) }
             try await bridge.receiveEPUBs()
             let arrived = try await bridge.receiveBooks()
-            if !arrived.isEmpty {
-                reload()
-                // A book only an iPhone had (part narrated): this Mac finishes it.
-                for id in arrived where books.first(where: { $0.id == id })?.isFullyRendered == false && !helperOnly { narrate(id) }
+            if !arrived.isEmpty { reload() }
+            // Books arrive text first and their audio follows. One being narrated on another
+            // running device is left to it. One nobody narrates is taken by the best running
+            // narrator: here if that's this Mac, or if nobody has taken it for half an hour.
+            let elsewhere = await bridge.narratingElsewhere()
+            var waiting = narratedElsewhere.union(arrived)
+            for id in waiting {
+                guard let m = books.first(where: { $0.id == id }), !m.isFullyRendered, m.canNarrate else { waiting.remove(id); continue }
+                if elsewhere.contains(id) || helperOnly { continue }
+                let sentences = m.chapters.filter { $0.audioStatus == .pending }.reduce(0) { $0 + $1.sentenceCount }
+                let best = await bridge.chooseNarrator(sentences: sentences)
+                let unclaimed = Date().timeIntervalSince(m.updatedAt) > 30 * 60
+                if best == bridgeDeviceID || best == nil || unclaimed { waiting.remove(id); narrate(id) }
             }
+            narratedElsewhere = waiting
             for id in try await bridge.retarget() { narrate(id) }      // its narrator went quiet: do it here
             try await bridge.publishNewBooks()
             try await bridge.collect()
@@ -353,6 +385,7 @@ public final class StudioStore: ObservableObject {
             bridgeSynced = Date()
             bridgeUsage = try? await bridge.client.usage()
         } catch {
+            cloudPausedUntil = await bridge.pausedUntil           // a cap reached: say so in Activity
             // Offline or a free-tier cap: everything waits here for the next round.
         }
     }
@@ -727,6 +760,7 @@ public final class StudioStore: ObservableObject {
         if Features.xteink { startXteinkWatcher() }
         startLibraryWatcher()
         resumeUnfinished()
+        upgradeAudioFormat()
         startBridge()
         startAllHelping()
     }
@@ -849,6 +883,7 @@ public final class StudioStore: ObservableObject {
                 // one dropped on this Mac goes to whichever running device finishes it first.
                 if fromPhone { for m in added { self.narrate(m.id) } }
                 else if self.autoNarrate { for m in added { self.narrateHereOrElsewhere(m) } }
+                if !added.isEmpty { self.kickBridge(after: 2) }   // the text goes to every device now
                 if !added.isEmpty { self.kickXteink() }
                 var lines: [String] = []
                 if !duplicates.isEmpty && !fromPhone { lines.append("Already in your library: \(duplicates.joined(separator: ", ")).") }
@@ -957,8 +992,30 @@ public final class StudioStore: ObservableObject {
         queue.removeAll { $0 == id }
     }
 
+    /// Books received from another device while it narrates them: not narrated here at launch.
+    private var narratedElsewhere: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "habla.narratedElsewhere") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: "habla.narratedElsewhere") }
+    }
+
+    /// Re-saves audio made with the older, larger setting as HE-AAC 24 kbps (about a third of
+    /// the size), one book at a time in the background. Books being narrated are left for later.
+    private func upgradeAudioFormat() {
+        let candidates = allBooks.map(\.id)
+        let lib = library
+        Task.detached(priority: .utility) { [weak self] in
+            for id in candidates {
+                let busy = await MainActor.run { self?.render?.bookID == id || self?.queue.contains(id) == true || self?.deleting.contains(id) == true }
+                if busy { continue }
+                let bundle = BookBundle(url: BookBundle.url(for: id, in: lib))
+                guard (try? AudioUpgrade.upgrade(bundle)) == true else { continue }
+                await MainActor.run { self?.reload(); self?.kickBridge(after: 5) }
+            }
+        }
+    }
+
     private func resumeUnfinished() {
-        let skip = stopped
+        let skip = stopped.union(narratedElsewhere)
         // Only languages with a voice may be narrated: a French/Hindi/German book narrated in an
         // earlier version must keep playing its existing audio, never be re-narrated in English.
         for m in allBooks where m.canNarrate && m.voice != nil && !m.chaptersToNarrate(voiceID: voice(for: m)).isEmpty
@@ -978,10 +1035,11 @@ public final class StudioStore: ObservableObject {
         let bundle = BookBundle(url: BookBundle.url(for: id, in: library))
         let voice = VoiceInfo(engine: "kokoro", voiceID: voice(for: m))
         let redo = renarrating.contains(id)
+        let gaps = retryingGaps.contains(id)
         let model = redo ? Self.kokoroModel : nil
         let narratable = m.chapters.filter { $0.audioStatus != .skipped }
         let total = narratable.reduce(0) { $0 + $1.sentenceCount }
-        let remaining = Set(m.chaptersToNarrate(voiceID: voice.voiceID, model: model).map(\.index))
+        let remaining = Set(m.chaptersToNarrate(voiceID: voice.voiceID, model: model, retryGaps: gaps).map(\.index))
         var done = narratable.filter { !remaining.contains($0.index) }.reduce(0) { $0 + $1.sentenceCount }
         recentSentenceTimes = []
         var lastTick = Date()
@@ -994,7 +1052,7 @@ public final class StudioStore: ObservableObject {
         renderTask = Task {
             var failure: String?
             do {
-                try await pipeline.render(bundle, voice: voice, replaceOtherModels: redo) { p in
+                try await pipeline.render(bundle, voice: voice, replaceOtherModels: redo, retryGaps: gaps) { p in
                     Task { @MainActor in
                         done += 1
                         let now = Date()
@@ -1012,15 +1070,17 @@ public final class StudioStore: ObservableObject {
                             secondsLeft: avg.map { $0 * Double(max(0, total - done)) })
                         if p.sentence == p.sentenceCount {   // chapter finished → visible to the iPhone now
                             self.reload()
+                            self.kickBridge(after: 5)        // and on its way to the other devices
                             if let fresh = self.allBooks.first(where: { $0.id == id }) {
-                                let left = Set(fresh.chaptersToNarrate(voiceID: voice.voiceID, model: model).map(\.index))
+                                let left = Set(fresh.chaptersToNarrate(voiceID: voice.voiceID, model: model, retryGaps: gaps).map(\.index))
                                 done = narratable.filter { !left.contains($0.index) }.reduce(0) { $0 + $1.sentenceCount }
                             }
                         }
                     }
                 }
                 if pipeline.skippedSentences > 0 {
-                    failure = "“\(m.title)” is narrated, but \(pipeline.skippedSentences) sentence\(pipeline.skippedSentences == 1 ? "" : "s") couldn't be voiced and \(pipeline.skippedSentences == 1 ? "was" : "were") left as a short silence. Choose Narrate again later to retry them; if it keeps happening, install the voice engine again."
+                    let n = pipeline.skippedSentences
+                    failure = "“\(m.title)” is narrated, but \(n) sentence\(n == 1 ? "" : "s") couldn't be voiced and \(n == 1 ? "was" : "were") left as a short silence. Choose Retry silent parts on the book to try again; if it keeps happening, install the voice engine again."
                 }
             } catch is CancellationError {
             } catch {
@@ -1037,10 +1097,11 @@ public final class StudioStore: ObservableObject {
                 self.reload()
                 let finished = self.allBooks.first { $0.id == id }.map { $0.chaptersToNarrate(voiceID: voice.voiceID, model: model).isEmpty } ?? true
                 if finished { self.renarrating.remove(id) }
+                self.retryingGaps.remove(id)                      // one try per request: no loop
                 if var failure {
                     if self.guestBooks[id] != nil { failure = "A book you're narrating for someone else: " + StudioStore.untitled(failure, m.title) }
                     self.alert = finished ? failure : "Narration stopped: \(failure)"
-                    if !finished { self.paused = true; return }
+                    if !finished { self.paused = true; self.pauseReason = "stopped after an error. Choose Resume to try again"; return }
                 }
                 if finished, self.queue.first == id { self.queue.removeFirst() }
                 if self.queue.isEmpty { Task { await engine.shutdown() }; self.engine = nil }
@@ -1148,6 +1209,16 @@ public final class StudioStore: ObservableObject {
     public func renarrate(_ id: String) {
         guard let m = books.first(where: { $0.id == id }), canRenarrate(m) else { return }
         renarrating.insert(id)
+        narrate(id)
+    }
+
+    /// Books whose silent sentences (the engine couldn't voice them) are being tried again.
+    @Published public private(set) var retryingGaps: Set<String> = []
+
+    /// Tries the silent sentences of a narrated book again (cached sentences make it quick).
+    public func retryGaps(_ id: String) {
+        guard let m = books.first(where: { $0.id == id }), m.canNarrate, m.silentSentences > 0 else { return }
+        retryingGaps.insert(id)
         narrate(id)
     }
 

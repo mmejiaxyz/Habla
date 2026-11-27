@@ -4,7 +4,10 @@ import AVFoundation
 /// Joins sentence clips into one chapter file (AAC .m4a), with natural pauses,
 /// silence trimming and tiny fades so joins never click. Records sentence timings.
 struct AudioAssembler {
-    var bitRate = 64_000
+    /// HE-AAC (AAC with spectral band replication) at 24 kbps mono: speech sounds the same as
+    /// AAC 64 kbps at about 11 MB per hour instead of 29 (the user picked it by listening).
+    static let formatID = kAudioFormatMPEG4AAC_HE
+    var bitRate = 24_000
     /// Fade length at each clip edge.
     var fade: TimeInterval = 0.008
     /// Silence kept at clip edges after trimming the engine's own padding.
@@ -65,7 +68,7 @@ struct AudioAssembler {
             format = f
             try? FileManager.default.removeItem(at: partURL)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let settings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: r,
+            let settings: [String: Any] = [AVFormatIDKey: AudioAssembler.formatID, AVSampleRateKey: r,
                                            AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: assembler.bitRate]
             // AVAudioFile picks the container from the extension; write as .m4a then rename.
             let tmp = partURL.deletingPathExtension().deletingPathExtension().appendingPathExtension("writing.m4a")

@@ -242,7 +242,7 @@ public struct ReaderView: View {
         }
         #if os(macOS)
         // A double-click on a word opens the card; wait a moment before treating a click as a tap.
-        if let last = lastClick, Date().timeIntervalSince(last.time) < NSEvent.doubleClickInterval,
+        if let last = lastClick, Date().timeIntervalSince(last.time) < min(NSEvent.doubleClickInterval, 0.3),
            hypot(last.at.x - v.location.x, last.at.y - v.location.y) < 8 {
             pendingTap?.cancel(); lastClick = nil
             select(at: v.location, in: size)
@@ -251,8 +251,18 @@ public struct ReaderView: View {
         lastClick = (Date(), v.location)
         let at = v.location
         pendingTap?.cancel()
+        // In the margins there's no word to double-click: act at once.
+        if at.x < insets.leading || at.x > size.width - insets.trailing
+            || (isSpread && abs(at.x - size.width / 2) < 48) {
+            lastClick = nil
+            tap(at: at, in: size)
+            return
+        }
+        // Over the text, wait just long enough to tell a double-click (capped: the system's
+        // interval can be half a second, which made every page turn feel slow).
+        let wait = min(NSEvent.doubleClickInterval, 0.3)
         pendingTap = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: UInt64(NSEvent.doubleClickInterval * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             guard !Task.isCancelled else { return }
             tap(at: at, in: size)
         }
@@ -278,8 +288,10 @@ public struct ReaderView: View {
                 Text("\(Int((model.bookFraction * 100).rounded()))%")
             } else {
                 Spacer()
+                // The chapter's name is always there (the controls bar that also shows it hides while reading).
                 Text(chrome ? "Page \(model.page + 1) of \(model.pageCount) · \(Int((model.bookFraction * 100).rounded()))%"
-                            : "\(Int((model.bookFraction * 100).rounded()))%")
+                            : [model.chapterTitle, "\(Int((model.bookFraction * 100).rounded()))%"].filter { !$0.isEmpty }.joined(separator: " · "))
+                    .lineLimit(1).truncationMode(.middle).padding(.horizontal, 24)
                 Spacer()
             }
         }

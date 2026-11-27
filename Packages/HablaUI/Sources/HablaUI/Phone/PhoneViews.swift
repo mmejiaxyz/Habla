@@ -99,6 +99,7 @@ public struct PhoneLibraryView: View {
     @ObservedObject var player: NarrationPlayer
     var open: (PhoneRoute) -> Void
     @State private var picking = false
+    @State private var showingActivity = false
     @State private var confirmRemove: BookItem?
     @State private var confirmDeleteAll: BookItem?
     @AppStorage("habla.library.sort") private var sort = LibrarySort.recent.rawValue
@@ -147,8 +148,10 @@ public struct PhoneLibraryView: View {
             VStack(alignment: .leading, spacing: 0) {
                 header.padding(.horizontal, Theme.margin - 4).padding(.top, 12)
 
-                if !store.cloudIncoming.isEmpty {
-                    CloudIncomingBanner(items: store.cloudIncoming).padding(.horizontal, 16).padding(.top, 18)
+                let activity = store.activitySnapshot
+                if !activity.isEmpty {
+                    ActivityStrip(activity) { showingActivity = true }
+                        .padding(.horizontal, 24).padding(.top, 14)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
@@ -188,6 +191,8 @@ public struct PhoneLibraryView: View {
             }
         }
         .refreshable { await store.sync() }
+        .sheet(isPresented: $showingActivity) { PhoneActivitySheet(store: store) }
+        .mobileDataConfirmation(store)
     }
 
     var header: some View {
@@ -409,9 +414,8 @@ public struct PhoneLibraryView: View {
     }
 
     func startOver(_ b: BookItem) {
-        let first = b.chapters.first { !$0.isFrontMatter }?.index ?? 0
         if player.bookID == b.id { player.unload() }
-        store.savePosition(book: b.id, chapter: first, sentence: 0, audioTime: nil, mode: .reading)
+        store.startOver(b.id)
     }
 
     // MARK: Empty
@@ -722,9 +726,8 @@ public struct PhoneBookView: View {
     }
 
     func startOver(_ b: BookItem) {
-        let first = b.chapters.first { !$0.isFrontMatter }?.index ?? 0
         if player.bookID == b.id { player.unload() }
-        store.savePosition(book: b.id, chapter: first, sentence: 0, audioTime: nil, mode: .reading)
+        store.startOver(b.id)
     }
 
     func openChapter(_ b: BookItem, _ c: ChapterItem) {

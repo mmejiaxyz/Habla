@@ -66,13 +66,29 @@ public enum Typesetter {
     }
 
     /// `language`: the book's language (ISO code) — hyphenation and line breaking follow it.
-    public static func set(_ chapter: ChapterText, style: ReaderStyle, language: String = "en") -> TypesetChapter {
+    /// `openingTitle`: the chapter's name, set as its opening heading when the text itself doesn't
+    /// start with one (image headings, TOC-only titles), so every chapter says which one it is.
+    public static func set(_ chapter: ChapterText, style: ReaderStyle, language: String = "en",
+                           openingTitle: String? = nil) -> TypesetChapter {
         let out = NSMutableAttributedString()
         var sentences: [(Int, NSRange)] = []
         let size = style.fontSize
         let ink = PlatformColor(style.theme.text)
         let body = serif(size, bold: style.theme == .bold)
         var indentNext = false
+
+        if let title = openingTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+           chapter.blocks.first?.kind != .heading {
+            let para = NSMutableParagraphStyle()
+            para.alignment = .center
+            para.hyphenationFactor = 0
+            para.lineHeightMultiple = 1.05
+            para.paragraphSpacingBefore = size * 2.2
+            para.paragraphSpacing = size * 1.5
+            out.append(NSAttributedString(string: title.replacingOccurrences(of: "\n", with: " ") + "\n", attributes: [
+                .font: serif(size * 1.4, bold: style.theme == .bold), .foregroundColor: ink,
+                .paragraphStyle: para, Self.languageKey: language]))
+        }
 
         for (i, block) in chapter.blocks.enumerated() {
             let start = (out.string as NSString).length
