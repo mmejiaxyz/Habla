@@ -311,9 +311,10 @@ async function v2(request, env, space, parts) {
     let body;
     try { body = await request.json(); } catch { return fail(400, 'bad json'); }
     if (!CODE_ID.test(body?.id ?? '') || typeof body.wrapped !== 'string' || body.wrapped.length > 4096) return fail(400, 'bad code');
+    // A new code replaces the oldest open ones: at most 3 wait at once, and asking again never fails.
     const now = Date.now();
-    const open = await env.DB.prepare('SELECT COUNT(*) AS n FROM codes WHERE space = ?1 AND expires > ?2').bind(space, now).first();
-    if ((open?.n ?? 0) >= 3) return fail(429, 'too many open codes', 'codes');
+    await env.DB.prepare(`DELETE FROM codes WHERE space = ?1 AND (expires <= ?2 OR id IN (
+        SELECT id FROM codes WHERE space = ?1 AND expires > ?2 ORDER BY expires DESC, rowid DESC LIMIT -1 OFFSET 2))`).bind(space, now).run();
     const expires = now + CODE_MINUTES * 60000;
     await env.DB.prepare('INSERT OR REPLACE INTO codes (id, space, wrapped, expires) VALUES (?1, ?2, ?3, ?4)')
       .bind(body.id, space, body.wrapped, expires).run();

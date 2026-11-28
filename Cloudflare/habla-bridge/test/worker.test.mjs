@@ -113,8 +113,12 @@ test('join codes: made by a device of the account, work once, expire, never read
   await call(e, 'POST', '/v2/codes', { body: JSON.stringify({ id: 'e'.repeat(64), wrapped: 'w' }) });
   e.DB.db.prepare('UPDATE codes SET expires = 0').run();
   assert.equal((await join('e'.repeat(64))).status, 404, 'expired');
-  for (const c of ['1', '2', '3']) await call(e, 'POST', '/v2/codes', { body: JSON.stringify({ id: c.repeat(64), wrapped: 'w' }) });
-  assert.equal((await call(e, 'POST', '/v2/codes', { body: JSON.stringify({ id: '4'.repeat(64), wrapped: 'w' }) })).status, 429);
+  for (const c of ['1', '2', '3', '4']) {
+    assert.equal((await call(e, 'POST', '/v2/codes', { body: JSON.stringify({ id: c.repeat(64), wrapped: 'w' }) })).status, 201, 'asking again never fails');
+  }
+  assert.equal(e.DB.db.prepare('SELECT COUNT(*) AS n FROM codes').get().n, 3, 'at most 3 wait');
+  assert.equal((await join('1'.repeat(64))).status, 404, 'the oldest was replaced');
+  assert.equal((await join('4'.repeat(64))).status, 200);
   // Creating accounts needs the server key, and accounts are capped.
   const make = (tok, secret = 's3cret') => call(e, 'POST', '/v2/accounts', {
     body: JSON.stringify({ tokenHash: createHash('sha256').update(tok).digest('hex') }), headers: { 'x-habla-enroll': secret }, token: null });
@@ -184,7 +188,7 @@ test('deleting anywhere deletes everywhere; only 3 books of audio wait in the cl
   assert.equal(v.books.filter((b) => b.audio).length, 3, 'the oldest book was dropped from the cloud');
   assert.equal(v.books.find((b) => b.key === key('5')).audio, null);
   // The phone deletes a book: it's a tombstone for everyone, and its chunks go.
-  const after = await sync(e, PHONE, { kind: 'phone', deleted: [{ key: key('8'), at: Date.now() }] });
+  const after = await sync(e, PHONE, { kind: 'phone', deleted: [{ key: key('8'), at: Date.now() - 50 }] });
   assert.ok(after.books.find((b) => b.key === key('8')).deletedAt);
   assert.ok(!e.BRIDGE.m.has(`${createHash('sha256').update(TOKEN).digest('hex')}/transit/${'3'.repeat(40)}`));
   // Adding the same EPUB again later brings it back.
