@@ -255,8 +255,10 @@ public struct XteinkSync {
     /// Sends every book whose original EPUB the Mac kept and the device doesn't have yet
     /// into `/Habla`. Each upload is verified by size on the device; a mismatch (power
     /// loss, Wi-Fi drop) is retried once. Never deletes the user's other files.
+    /// `onBook`: each book being sent (id, title, what's happening), for the Activity list.
     public func pushBooks(from library: URL, only ids: Set<String>? = nil,
-                          progress: (@Sendable (String) -> Void)? = nil) async throws -> PushResult {
+                          progress: (@Sendable (String) -> Void)? = nil,
+                          onBook: (@Sendable (String, String, ActivityItem.State) -> Void)? = nil) async throws -> PushResult {
         let root = try await device.files(in: "/")
         if let clash = root.first(where: { $0.name == folder }), !clash.isDirectory {
             throw SyncError.http(409, "A file named '\(folder)' is in the way on the device")
@@ -280,6 +282,7 @@ public struct XteinkSync {
             let there = existing.first { $0.name == name && !$0.isDirectory }
             if there?.size == size { result.alreadyThere.append(m.title); continue }
             progress?(m.title)
+            onBook?(m.id, m.title, .running(nil))
             var ok = false
             var reason = ""
             for _ in 0..<2 where !ok {
@@ -292,7 +295,8 @@ public struct XteinkSync {
                     reason = (error as? SyncError)?.description ?? error.localizedDescription
                 }
             }
-            if ok { result.sent.append(m.title) } else { result.failed.append((m.title, reason)) }
+            if ok { result.sent.append(m.title); onBook?(m.id, m.title, .done) }
+            else { result.failed.append((m.title, reason)); onBook?(m.id, m.title, .failed("Didn’t reach the Xteink: \(reason). It tries again.")) }
         }
         return result
     }

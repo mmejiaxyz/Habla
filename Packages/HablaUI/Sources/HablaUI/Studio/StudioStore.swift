@@ -1118,9 +1118,13 @@ public final class StudioStore: ObservableObject {
                     let removed = try await sync.removeBooks(removals)
                     xteinkRemovals = xteinkRemovals.subtracting(removed)
                 }
-                let result = try await sync.pushBooks(from: library, only: Set(books.map(\.id))) { title in
+                let result = try await sync.pushBooks(from: library, only: Set(books.map(\.id)), progress: { title in
                     Task { @MainActor in self.xteink = .working("Sending “\(title)”…") }
-                }
+                }, onBook: { id, title, state in
+                    Task { @MainActor in
+                        self.activityEvents.note(ActivityItem(id: "xteink-" + id, bookID: id, title: title, kind: .sending, state: state, route: "Xteink"))
+                    }
+                })
                 xteinkLastSync = Date()
                 UserDefaults.standard.set(xteinkLastSync, forKey: "habla.xteinkLast")
                 if let f = result.failed.first {

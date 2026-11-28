@@ -51,6 +51,7 @@ extension StudioWindowView {
                 .padding(.horizontal, 10).padding(.top, 30).padding(.bottom, 16)
             navItem("Library", "books.vertical", count: store.books.count, on: !narratingOnly) { narratingOnly = false; showingBook = false }
             navItem("Narrating", "headphones", count: narratingIDs.count, on: narratingOnly) { narratingOnly = true; showingBook = false }
+            StudioActivityButton(store: store).padding(.horizontal, 6).padding(.top, 8)   // always here, whatever the page
 
             CapsLabel("Devices").padding(.horizontal, 10).padding(.top, 26).padding(.bottom, 2)
             devices.padding(.horizontal, -14)

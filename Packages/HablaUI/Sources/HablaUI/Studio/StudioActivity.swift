@@ -43,25 +43,26 @@ extension StudioStore {
                                          cover: img, accentHex: accent, tone: .waiting,
                                          actionLabel: "Cancel", action: { [weak self] in self?.cancelNarration(id) }))
         }
-        // Books going through the cloud.
+        // Books going through the cloud, or onto the Xteink.
         for e in activityEvents {
             let (img, accent, title) = cover(e.bookID)
             let name = e.title ?? title
+            let toXteink = e.route == "Xteink"
             switch e.state {
             case .running(let p):
                 let pct = p.map { " · \(Int(($0 * 100).rounded()))%" } ?? ""
                 entries.append(ActivityEntry(id: e.id, kind: (e.kind == .sending ? "Sending" : "Getting") + pct, title: name,
-                                             detail: e.kind == .sending ? "Through the cloud to your other devices" : "Through the cloud",
+                                             detail: toXteink ? "To your Xteink over Wi-Fi" : e.kind == .sending ? "Through the cloud to your other devices" : "Through the cloud",
                                              cover: img, accentHex: accent, progress: p, tone: .running))
             case .waiting(let why):
                 entries.append(ActivityEntry(id: e.id, kind: "Waiting", title: name, detail: why, cover: img, accentHex: accent, tone: .waiting))
             case .failed(let why):
                 entries.append(ActivityEntry(id: e.id, kind: "Didn’t finish", title: name, detail: why, cover: img, accentHex: accent,
-                                             tone: .failed, actionLabel: "Try again", action: { [weak self] in self?.kickBridge(after: 0.5) }))
+                                             tone: .failed, actionLabel: "Try again", action: { [weak self] in toXteink ? self?.kickXteink() : self?.kickBridge(after: 0.5) }))
             case .done:
                 let time = e.updatedAt.formatted(date: .omitted, time: .shortened)
                 entries.append(ActivityEntry(id: e.id, kind: (e.kind == .sending ? "Sent · " : "Arrived · ") + time, title: name,
-                                             detail: e.kind == .sending ? "On the cloud for your other devices" : "From your other device",
+                                             detail: toXteink ? "On your Xteink" : e.kind == .sending ? "On the cloud for your other devices" : "From your other device",
                                              cover: img, accentHex: accent, tone: .done))
             }
         }
@@ -78,6 +79,19 @@ extension StudioStore {
             else { status = "Seen " + d.lastSeen.formatted(.relative(presentation: .named)) }
             devices.append(ActivityDevice(id: d.id, name: d.name, status: status,
                                           online: d.online || Date().timeIntervalSince(d.lastSeen) < 5 * 60))
+        }
+
+        // The Xteink, when this Mac looks after it.
+        if Features.xteink {
+            let (status, online): (String, Bool) = {
+                switch xteink {
+                case .looking: return (xteinkLastSync.map { "Last synced " + $0.formatted(.relative(presentation: .named)) + " · open File Transfer to send books" }
+                                       ?? "Not found · on the Xteink, open File Transfer", false)
+                case .found(_, let d), .done(let d), .working(let d): return (d, true)
+                case .failed(let d): return (d, false)
+                }
+            }()
+            devices.append(ActivityDevice(id: "xteink", name: "Xteink", status: status, online: online))
         }
 
         var notice: (String, String)?
