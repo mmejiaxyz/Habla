@@ -73,7 +73,6 @@ struct StudioApp: App {
             let more = store.queue.count > 1 ? " · \(store.queue.count - 1) more waiting" : ""
             return "Narrating a book · \(pct)%" + more
         }
-        if store.helperOnly { return "Helping narrate · idle" }
         return store.paused && !store.queue.isEmpty ? "Narration paused" : "Working in the background"
     }
 

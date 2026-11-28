@@ -1059,37 +1059,27 @@ public struct PhoneMacView: View {
         .onAppear { storageLine = computeStorage() }
         .confirmationDialog("Leave “\(store.accountName ?? "this account")”?", isPresented: $confirmLeave, titleVisibility: .visible) {
             Button("Leave", role: .destructive) { store.leaveAccount() }
-        } message: { Text("Downloaded books stay on this iPhone, but nothing syncs until you scan the account’s QR code again.") }
+        } message: { Text("Downloaded books stay on this iPhone, but nothing syncs until you join again with a code from one of your devices.") }
         #if os(iOS)
         .fullScreenCover(isPresented: $scanning) {
             QRScanner { url in scanning = false; store.handleLink(url) } cancel: { scanning = false }
                 .ignoresSafeArea()
         }
         #endif
-        .sheet(isPresented: $showQR, onDismiss: { copiedCode = false }) {
+        .sheet(isPresented: $showQR, onDismiss: { store.hideJoinCode() }) {
             VStack(spacing: 18) {
-                Text(store.accountName ?? "Your account").font(Theme.display(30)).foregroundStyle(Theme.text)
-                if let link = store.accountLink {
-                    AccountQR(text: link.absoluteString).frame(width: 240, height: 240).padding(16)
+                Text("Add a device").font(Theme.display(30)).foregroundStyle(Theme.text)
+                if let shown = store.shownCode {
+                    AccountQR(text: shown.link.absoluteString).frame(width: 220, height: 220).padding(16)
                         .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.white))
-                }
-                Text("Another iPhone: scan this with its Camera. A Mac: copy the code (or AirDrop it) and paste it in Habla → Join your account. Anyone with this code gets your library: only use it on your own devices.")
-                    .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let link = store.accountLink {
-                    HStack(spacing: 10) {
-                        ActionPill(copiedCode ? "Copied" : "Copy code", symbol: "doc.on.doc", style: .ink, height: 46) {
-                            #if canImport(UIKit)
-                            UIPasteboard.general.string = link.absoluteString
-                            #endif
-                            copiedCode = true
-                        }
-                        ShareLink(item: link.absoluteString) {
-                            Label("Share", systemImage: "square.and.arrow.up").font(Theme.grotesk(15)).foregroundStyle(Theme.text)
-                                .padding(.horizontal, 20).frame(height: 46)
-                                .background(Capsule().stroke(Theme.text.opacity(0.4)))
-                        }
-                    }
+                    Text(shown.code).font(.system(size: 30, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.text)
+                        .textSelection(.enabled).accessibilityLabel("Code \(shown.code.map(String.init).joined(separator: " "))")
+                    Text("Another iPhone: scan this with its Camera. A Mac: type the code in Habla → Join your account. It works once, for 15 minutes.")
+                        .font(Theme.grotesk(13)).foregroundStyle(Theme.textDim).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ProgressView().padding(40)
+                    Text("Making a code…").font(Theme.grotesk(13)).foregroundStyle(Theme.textDim)
                 }
             }
             .padding(28)
@@ -1123,13 +1113,27 @@ public struct PhoneMacView: View {
                     Task { await store.sync(); await store.syncAccount() }
                 }
                 .disabled(store.syncing)
-                ActionPill("Show QR code", symbol: "qrcode", style: .outline, height: 46) { showQR = true }
+                ActionPill("Add a device", symbol: "plus", style: .outline, height: 46) {
+                    showQR = true
+                    Task { await store.showJoinCode() }
+                }
             }
             .padding(.top, 10)
-            ActionPill("Scan a Mac’s QR code", symbol: "qrcode.viewfinder", style: .outline, height: 46) { store.notice = nil; scanning = true }
-                .padding(.top, 4)
-            Text("A new Mac shows a QR code: scan it to add that Mac to your account.")
-                .font(Theme.grotesk(12)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true)
+            if !store.accountDevices.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(store.accountDevices) { d in
+                        HStack(spacing: 8) {
+                            Circle().fill(d.online ? Color(hex: "#6BA878") : Theme.textDim.opacity(0.4)).frame(width: 7, height: 7)
+                            Text(d.name).font(Theme.grotesk(14)).foregroundStyle(Theme.text)
+                            Spacer()
+                            Text(d.online ? "online" : Format.ago(d.lastSeen)).font(Theme.grotesk(12)).foregroundStyle(Theme.textDim)
+                        }
+                        .padding(.vertical, 8)
+                        .contextMenu { Button("Remove from the account", role: .destructive) { store.forgetDevice(d) } }
+                    }
+                }
+                .padding(.top, 12)
+            }
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1139,23 +1143,23 @@ public struct PhoneMacView: View {
     var joinCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Join your account").font(Theme.display(32)).foregroundStyle(Theme.text)
-            Text("In Habla on your Mac, open Account and scan its QR code.")
+            Text("On a device already in your account, open Account → Add a device, then scan its QR code or type the code.")
                 .font(Theme.grotesk(14)).foregroundStyle(Theme.textDim).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
             ActionPill("Scan QR code", symbol: "qrcode.viewfinder", style: .ink, height: 50) { scanning = true }
                 .padding(.top, 18)
-            CapsLabel("Or paste the account code").padding(.top, 22)
+            CapsLabel("Or type the code").padding(.top, 22)
             HStack(spacing: 10) {
-                TextField("habla://account…", text: $code)
-                    .textFieldStyle(.plain).font(Theme.grotesk(15))
+                TextField("XXXX-XXXX-XXXX", text: $code)
+                    .textFieldStyle(.plain).font(.system(size: 17, weight: .medium, design: .monospaced))
                     .autocorrectionDisabled()
                     #if os(iOS)
-                    .textInputAutocapitalization(.never)
+                    .textInputAutocapitalization(.characters)
                     #endif
                     .padding(.horizontal, 16).frame(height: 46)
                     .background(Capsule().fill(Theme.paper))
-                    .onSubmit { if store.joinAccount(code) { code = "" } }
-                CapsuleButton("Join", height: 46) { if store.joinAccount(code) { code = "" } }
-                    .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .onSubmit { Task { if await store.joinAccount(code: code) { code = "" } } }
+                CapsuleButton(store.joining == nil ? "Join" : "Joining…", height: 46) { Task { if await store.joinAccount(code: code) { code = "" } } }
+                    .disabled(JoinCode(code) == nil || store.joining != nil)
             }.padding(.top, 10)
         }
         .padding(22)

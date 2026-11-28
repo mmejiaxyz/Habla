@@ -46,6 +46,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>HablaBridgeURL</key>
+	<string>$(HABLA_BRIDGE_URL)</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<false/>
 	<key>NSAppTransportSecurity</key>

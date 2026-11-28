@@ -42,10 +42,9 @@ public final class StudioStore: ObservableObject {
         case failed(String)
     }
 
-    /// This Mac's own books (what the shelf, its phones and its other Macs see).
+    /// The books on this Mac (the account's library).
     @Published public private(set) var books: [BookManifest] = []
-    /// Every book in the folder, including ones narrated here for someone else's library.
-    private var allBooks: [BookManifest] = []
+    private var allBooks: [BookManifest] { books }
     @Published public var selection: String?
     @Published public private(set) var importing: [String] = []
     @Published public var alert: String?
@@ -85,25 +84,6 @@ public final class StudioStore: ObservableObject {
     }
     private var applyingAccountVoice = false
 
-    /// Help narrate only: this Mac narrates books for the account's other devices but never shows
-    /// them, never syncs places or marks, and keeps nothing once they're delivered.
-    @Published public var helperOnly: Bool = UserDefaults.standard.bool(forKey: "habla.helperOnly") {
-        didSet {
-            guard helperOnly != oldValue else { return }
-            UserDefaults.standard.set(helperOnly, forKey: "habla.helperOnly")
-            if helperOnly { server.stop() } else { startServer() }
-            bridgeLoop?.cancel(); listener?.stop(); listener = nil; bridge = nil
-            try? FileManager.default.removeItem(at: support.appendingPathComponent("bridge-state.json"))
-            startBridge()
-        }
-    }
-    /// Books that were on this Mac before a helper job named them: never deleted by helping.
-    private var helperKeep: Set<String> {
-        get { Set(UserDefaults.standard.stringArray(forKey: "habla.helperKeep") ?? []) }
-        set { UserDefaults.standard.set(Array(newValue), forKey: "habla.helperKeep") }
-    }
-    /// Helper: books being narrated or waiting to be collected (no titles shown).
-    @Published public private(set) var helperJobs = 0
     @Published public var autoNarrate: Bool = UserDefaults.standard.object(forKey: "habla.autoNarrate") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoNarrate, forKey: "habla.autoNarrate") }
     }
@@ -174,56 +154,120 @@ public final class StudioStore: ObservableObject {
         }
         server.markers = markers
         server.account.value = currentBridgeConfig.map { BridgeKeys(libraryKey: $0.libraryKey) }
-        let hidden = hiddenIDs
-        server.isHidden = { hidden.contains($0) }
-        hiddenIDs.set(Set(guestBooks.keys))
-        helping = loadHelping()
         devices = registry.all
         reload()
         checkVoiceEngine()
     }
 
-    // MARK: Cloud bridge (Docs/cloud-bridge.md)
+    // MARK: Account (Docs/cloud-bridge.md)
 
     public let markers: MarkerStore
-    /// When the cloud bridge last synced, for Settings.
-    @Published public private(set) var bridgeSynced: Date?
+    /// When this Mac last talked to the account, for Settings.
+    @Published public private(set) var bridgeSynced: Date? = UserDefaults.standard.object(forKey: "habla.accountSynced") as? Date {
+        didSet { UserDefaults.standard.set(bridgeSynced, forKey: "habla.accountSynced") }
+    }
     @Published public private(set) var bridgeUsage: BridgeUsage?
-    private var bridge: BridgeSync?
+    private var bridge: AccountSync?
     private var bridgeLoop: Task<Void, Never>?
     private var bridgeKick: Task<Void, Never>?
+    private var listener: BridgeListener?
+    private var wakeObserver: NSObjectProtocol?
 
-    /// `Security/bridge.json`: the Worker URL, the library key (made here once) and, until this
-    /// Mac has enrolled, the Worker's enrollment secret. Never leaves this Mac except to paired phones.
+    /// `Security/bridge.json` (0600): the Worker's address and the account key. Never leaves this
+    /// Mac except sealed inside a one-time code.
     struct BridgeFile: Codable { var url: URL; var libraryKey: Data?; var enrollSecret: String? }
     var bridgeFileURL: URL { support.appendingPathComponent("Security/bridge.json") }
 
     private func saveBridgeFile(_ f: BridgeFile) {
+        try? FileManager.default.createDirectory(at: bridgeFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard let d = try? JSONEncoder().encode(f) else { return }
         try? d.write(to: bridgeFileURL, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: bridgeFileURL.path)
     }
 
-    /// The code another Mac pastes to join this library's bridge (it holds the library key:
-    /// treat it like a password).
-    public var bridgeLinkCode: String? { accountLink?.absoluteString }
+    private var currentBridgeConfig: BridgeConfig? {
+        guard let file = (try? Data(contentsOf: bridgeFileURL)).flatMap({ try? JSONDecoder().decode(BridgeFile.self, from: $0) }),
+              let key = file.libraryKey else { return nil }
+        return BridgeConfig(url: file.url, libraryKey: key)
+    }
 
-    // MARK: Account (one library on every device)
+    /// The Worker's address: built into the app (`HablaBridgeURL`), else the one this Mac used before.
+    public var bridgeURL: URL? {
+        if let s = Bundle.main.object(forInfoDictionaryKey: "HablaBridgeURL") as? String, let u = URL(string: s), u.scheme == "https" { return u }
+        return (try? Data(contentsOf: bridgeFileURL)).flatMap { try? JSONDecoder().decode(BridgeFile.self, from: $0) }?.url
+    }
 
     /// The account's name (synced to every device).
     @Published public private(set) var accountName: String? = UserDefaults.standard.string(forKey: "habla.accountName")
-    /// The account's other devices, as the bridge last saw them.
+    /// The account's other devices, as the account last told this Mac.
     @Published public private(set) var accountDevices: [AccountDevice] = []
 
-    /// The account's QR code / code to paste: a habla://account link (works like a password).
-    public var accountLink: URL? { currentBridgeConfig.map { AccountCode.url($0, name: accountName) } }
+    /// A one-time code on screen for a new device (Add a device…).
+    public struct ShownCode: Equatable {
+        public var code: String
+        public var link: URL
+        public var expires: Date
+    }
+    @Published public private(set) var shownCode: ShownCode?
+
+    public var bridgeReady: Bool { bridge != nil }
+
+    public enum AccountError: Error, Equatable, CustomStringConvertible {
+        case noServer, badCode, codeNotFound, alreadyInAccount, failed(String)
+        public var description: String {
+            switch self {
+            case .noServer: return "This copy of Habla doesn't know where your account lives. Enter the server address."
+            case .badCode: return "That isn't a code. It looks like XXXX-XXXX-XXXX."
+            case .codeNotFound: return "That code didn't work: it was used, it expired (after 15 minutes), or a character is off."
+            case .alreadyInAccount: return "This Mac is already in an account."
+            case .failed(let m): return m
+            }
+        }
+    }
+
+    /// Creates the account here (needs the Worker's server key, which only you have).
+    public func createAccount(name: String, serverKey: String, server: URL? = nil) async throws {
+        guard currentBridgeConfig == nil else { throw AccountError.alreadyInAccount }
+        guard let url = server ?? bridgeURL else { throw AccountError.noServer }
+        do {
+            let config = try await AccountSync.createAccount(at: url, serverKey: serverKey.trimmingCharacters(in: .whitespacesAndNewlines))
+            adopt(config, name: name)
+        } catch BridgeError.unauthorized { throw AccountError.failed("The server key isn't right.") }
+        catch let e as BridgeError { throw AccountError.failed(e.description) }
+    }
+
+    /// Joins an account with the one-time code another of its devices shows.
+    public func joinAccount(code typed: String, server: URL? = nil) async throws {
+        guard currentBridgeConfig == nil else { throw AccountError.alreadyInAccount }
+        guard let code = JoinCode(typed) else { throw AccountError.badCode }
+        guard let url = server ?? bridgeURL else { throw AccountError.noServer }
+        do {
+            let (config, name) = try await AccountSync.join(code, at: url)
+            adopt(config, name: name)
+        } catch BridgeError.http(404) { throw AccountError.codeNotFound }
+        catch BridgeError.corrupt { throw AccountError.codeNotFound }
+        catch let e as BridgeError { throw AccountError.failed(e.description) }
+    }
+
+    /// Shows a fresh one-time code (and its QR code) for a new device: 15 minutes, works once.
+    public func showJoinCode() async {
+        guard let bridge else { return }
+        do {
+            let code = try await bridge.makeJoinCode()
+            shownCode = ShownCode(code: code.display, link: code.link(bridge: bridge.config.url), expires: Date().addingTimeInterval(15 * 60))
+        } catch {
+            alert = "Couldn't make a code: \((error as? BridgeError)?.description ?? error.localizedDescription)"
+        }
+    }
+
+    public func hideJoinCode() { shownCode = nil }
 
     /// Removes a device from the account (e.g. this Mac before a clean install).
     public func forgetDevice(_ d: AccountDevice) {
         guard let bridge else { return }
         accountDevices.removeAll { $0.id == d.id }
         Task {
-            try? await bridge.forget(deviceID: d.id)
+            try? await bridge.removeDevice(d.id)
             accountDevices = await bridge.devices()
         }
     }
@@ -243,75 +287,41 @@ public final class StudioStore: ObservableObject {
     private func setServerAccount(_ keys: BridgeKeys?) {
         guard server.account.value?.lanToken != keys?.lanToken else { return }
         server.account.value = keys
-        if started && !helperOnly { server.stop(); startServer() }
+        if started { server.stop(); startServer() }
     }
 
-    public var bridgeReady: Bool { bridge != nil }
-
-    /// Joins the bridge of another Mac from its link code. Returns false for a bad code.
-    @discardableResult
-    public func joinBridge(code: String) -> Bool {
-        guard let (config, name) = AccountCode.parse(code) else { return false }
-        if let name { accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName") }
-        try? FileManager.default.createDirectory(at: bridgeFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    private func adopt(_ config: BridgeConfig, name: String?) {
         saveBridgeFile(BridgeFile(url: config.url, libraryKey: config.libraryKey, enrollSecret: nil))
-        try? FileManager.default.removeItem(at: support.appendingPathComponent("bridge-state.json"))
+        if let name, !name.isEmpty { accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName") }
+        try? FileManager.default.removeItem(at: accountStateURL)
         bridgeLoop?.cancel(); listener?.stop(); listener = nil; bridge = nil
         startBridge()
+        if let name = accountName, let bridge { Task { await bridge.setName(name); kickBridge(after: 1) } }
         objectWillChange.send()
-        return true
     }
 
-    /// Sets the bridge up (once), then syncs through it every 5 minutes.
+    var accountStateURL: URL { support.appendingPathComponent("account-state.json") }
+    var bridgeDeviceID: String { "mac-" + StudioStore.libraryID() }
+
+    /// Starts talking to the account: a live connection for nudges, a round at once, a safety
+    /// round every 6 hours.
     private func startBridge() {
-        guard var file = (try? Data(contentsOf: bridgeFileURL)).flatMap({ try? JSONDecoder().decode(BridgeFile.self, from: $0) }) else { return }
-        if file.libraryKey == nil { file.libraryKey = BridgeKeys.newLibraryKey(); saveBridgeFile(file) }
-        guard let key = file.libraryKey else { return }
-        let config = BridgeConfig(url: file.url, libraryKey: key)
-        server.bridgeConfig = { config }
-        setServerAccount(BridgeKeys(libraryKey: key))
-        let b = BridgeSync(config: config, deviceID: "mac-" + StudioStore.libraryID(), deviceName: server.serviceName,
-                           role: helperOnly ? .helper : .mac,
-                           progress: progress, markers: markers, library: library,
-                           stateURL: support.appendingPathComponent("bridge-state.json"))
-        let registry = registry
-        let hidden = hiddenIDs
+        guard let config = currentBridgeConfig else { return }
+        setServerAccount(BridgeKeys(libraryKey: config.libraryKey))
+        let b = AccountSync(config: config, deviceID: bridgeDeviceID, deviceName: server.serviceName, kind: .mac,
+                            progress: progress, markers: markers, library: library, stateURL: accountStateURL)
         bridge = b
-        Task { await b.setActivityHandler { [weak self] item in Task { @MainActor in self?.activityEvents.note(item) } } }
+        let model = Self.kokoroModel
+        Task {
+            await b.configure(readiness: { m, voice in
+                let left = m.chaptersToNarrate(voiceID: voice, model: model)
+                let leftIDs = Set(left.map(\.index))
+                return (m.chapters.filter { $0.audioStatus == .ready && !leftIDs.contains($0.index) }.count,
+                        m.canNarrate ? left.reduce(0) { $0 + $1.sentenceCount } : 0)
+            })
+            await b.setActivityHandler { [weak self] item in Task { @MainActor in self?.activityEvents.note(item) } }
+        }
         bridgeLoop = Task { [weak self] in
-            _ = registry
-            await b.configure(inbox: self?.server.inbox, onEPUB: { file, voice in
-                Task { @MainActor in
-                    guard let self, let id = try? DocumentDigest.sha256Prefix(of: file) else { return }
-                    // Narrated with the account voice the sender used.
-                    if let voice { UserDefaults.standard.set(voice, forKey: "habla.voice.\(id)") }
-                    // A book this Mac was narrating for someone else, now added by you: it's yours too.
-                    if self.guestBooks[id] != nil { self.guestBooks[id] = nil }
-                    if self.books.contains(where: { $0.id == id }) {
-                        // Already here: narrate this copy, and never delete it when the job ends.
-                        if self.helperOnly { var k = self.helperKeep; k.insert(id); self.helperKeep = k }
-                        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-                        self.narrate(id)
-                    } else {
-                        self.importFiles([file], fromPhone: true)
-                    }
-                }
-            }, onJobDone: { id in
-                Task { @MainActor in
-                    guard let self else { return }
-                    if self.helperKeep.contains(id) { var k = self.helperKeep; k.remove(id); self.helperKeep = k }
-                    else { self.delete(id) }                     // delivered: nothing stays on a helper
-                }
-            }, hidden: { hidden.all })
-            if let secret = file.enrollSecret {
-                do {
-                    try await b.client.enroll(tokenHash: BridgeKeys(libraryKey: key).tokenHash, secret: secret)
-                    file.enrollSecret = nil
-                    self?.saveBridgeFile(file)
-                } catch { return }                       // retried at the next launch
-            }
-            // Listen: a nudge the moment another device changes something (and on every
-            // reconnect after sleep or a network change). A safety look every 6 hours.
             let listener = BridgeListener(config: config, deviceID: "mac-" + StudioStore.libraryID()) {
                 Task { @MainActor in self?.kickBridge(after: 2) }
             }
@@ -329,240 +339,53 @@ public final class StudioStore: ObservableObject {
             }
         }
     }
-    private var listener: BridgeListener?
-    private var wakeObserver: NSObjectProtocol?
 
-    /// Places, markers, EPUBs from phones, new books out, collected books deleted.
+    /// Books the account gave this Mac to narrate (resumed at launch).
+    private var assignedHere: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "habla.assignedHere") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: "habla.assignedHere") }
+    }
+
+    /// The account decides who narrates while this Mac can reach it; offline for half an hour
+    /// (or no account), this Mac narrates its own books.
+    var accountDecides: Bool {
+        guard bridge != nil, let at = bridgeSynced else { return false }
+        return Date().timeIntervalSince(at) < 30 * 60
+    }
+
+    /// One round with the account: report, take what's offered, send what's asked, narrate what
+    /// it gives this Mac, delete what was deleted elsewhere.
     func runBridge() async {
         guard let bridge else { return }
         do {
             await bridge.setNarrator(narratorStatus)
-            await bridge.setNarrating(queue + (render.map { [$0.bookID] } ?? []))
             await bridge.setEndpoints(serverAddress.map { [$0] } ?? [])
-            try await bridge.syncState()
-            let account = await bridge.settings.voice
-            if account != defaultVoice { applyingAccountVoice = true; defaultVoice = account; applyingAccountVoice = false }
-            if let name = await bridge.settings.name, name != accountName {
-                accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName")
-            } else if await bridge.settings.name == nil, let name = accountName {
-                await bridge.setName(name)                          // named here before the account knew
-            }
+            await bridge.setBusy(Set(render.map { [$0.bookID] } ?? []))
+            let r = try await bridge.sync()
+            let s = await bridge.settings
+            if s.voiceAt.timeIntervalSince1970 > 0, s.voice != defaultVoice { applyingAccountVoice = true; defaultVoice = s.voice; applyingAccountVoice = false }
+            if let name = s.name, name != accountName { accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName") }
+            else if s.name == nil, let name = accountName { await bridge.setName(name) }
             accountDevices = await bridge.devices()
             narratingOn = await bridge.narratingDevices()
             cloudPausedUntil = await bridge.pausedUntil
-            // Deleted on another device: deleted here too.
-            for id in await bridge.booksDeletedElsewhere() { removeFromXteink(id); delete(id) }
-            try await bridge.receiveEPUBs()
-            let arrived = try await bridge.receiveBooks()
-            if !arrived.isEmpty { reload(); kickXteink() }      // books from other devices go on to the Xteink
-            // Books arrive text first and their audio follows. One being narrated on another
-            // running device is left to it. One nobody narrates is taken by the best running
-            // narrator: here if that's this Mac, or if nobody has taken it for half an hour.
-            let elsewhere = await bridge.narratingElsewhere()
-            var waiting = narratedElsewhere.union(arrived)
-            for id in waiting {
-                guard let m = books.first(where: { $0.id == id }), !m.isFullyRendered, m.canNarrate else { waiting.remove(id); continue }
-                if elsewhere.contains(id) || helperOnly { continue }
-                let sentences = m.chapters.filter { $0.audioStatus == .pending }.reduce(0) { $0 + $1.sentenceCount }
-                let best = await bridge.chooseNarrator(sentences: sentences)
-                let unclaimed = Date().timeIntervalSince(m.updatedAt) > 30 * 60
-                if best == bridgeDeviceID || best == nil || unclaimed { waiting.remove(id); narrate(id) }
+            for id in r.deleted { removeFromXteink(id); delete(id) }
+            if !r.arrived.isEmpty { reload(); kickXteink() }
+            // The account decides who narrates: what it gives this Mac is queued; what it gave
+            // another device isn't narrated here too.
+            let mine = Set(r.narrate)
+            assignedHere = mine
+            for id in r.narrate where !queue.contains(id) && render?.bookID != id && !stopped.contains(id) { narrate(id, unpause: false) }
+            for id in queue where !mine.contains(id) && narratingOn[id] != nil {
+                if render?.bookID == id { renderTask?.cancel() }
+                queue.removeAll { $0 == id }
             }
-            narratedElsewhere = waiting
-            for id in try await bridge.retarget() { narrate(id) }      // its narrator went quiet: do it here
-            try await bridge.publishNewBooks()
-            try await bridge.collect()
-            // Books wait on the bridge only while someone asks: look again soon, so one asked for
-            // by a phone that went quiet (closed, offline) is deleted within minutes.
-            if await bridge.hasBooksInTransit, transitCheck == nil {
-                transitCheck = Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 330 * 1_000_000_000)
-                    self?.transitCheck = nil
-                    await self?.runBridge()
-                }
-            }
-            helperJobs = await bridge.jobs.count
             bridgeSynced = Date()
             bridgeUsage = try? await bridge.client.usage()
         } catch {
             cloudPausedUntil = await bridge.pausedUntil           // a cap reached: say so in Activity
-            // Offline or a free-tier cap: everything waits here for the next round.
+            if !accountDecides { resumeUnfinished() }               // offline a while: narrate here
         }
-    }
-
-    var bridgeDeviceID: String { "mac-" + StudioStore.libraryID() }
-
-    // MARK: Helping someone else's library
-
-    /// Someone else's library this Mac narrates for (`Security/helping.json`, 0600). Its books
-    /// are narrated here but hidden from this Mac's shelf, its phones, its other Macs and the
-    /// Xteink, and deleted once their devices have them.
-    public struct HelpedLibrary: Codable, Identifiable, Equatable {
-        public var name: String
-        var url: URL
-        var libraryKey: Data
-        public var id: String { SHA256.hash(data: libraryKey).prefix(6).map { String(format: "%02x", $0) }.joined() }
-        var config: BridgeConfig { BridgeConfig(url: url, libraryKey: libraryKey) }
-    }
-    @Published public private(set) var helping: [HelpedLibrary] = []
-    /// Books narrating or waiting to be collected, per helped library (no titles).
-    @Published public private(set) var helpingJobs: [String: Int] = [:]
-    private var helpingRuns: [String: (sync: BridgeSync, loop: Task<Void, Never>, listener: BridgeListener)] = [:]
-    private var helpingKick: Task<Void, Never>?
-    /// Guest book id → the helped library it belongs to.
-    private var guestBooks: [String: String] = (UserDefaults.standard.dictionary(forKey: "habla.guestBooks") as? [String: String]) ?? [:] {
-        didSet {
-            UserDefaults.standard.set(guestBooks, forKey: "habla.guestBooks")
-            hiddenIDs.set(Set(guestBooks.keys))
-            if guestBooks != oldValue { reload() }
-        }
-    }
-    let hiddenIDs = HiddenIDs()
-
-    var helpingFileURL: URL { support.appendingPathComponent("Security/helping.json") }
-
-    private func loadHelping() -> [HelpedLibrary] {
-        (try? Data(contentsOf: helpingFileURL)).flatMap { try? JSONDecoder().decode([HelpedLibrary].self, from: $0) } ?? []
-    }
-    private func saveHelping() {
-        try? FileManager.default.createDirectory(at: helpingFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard let d = try? JSONEncoder().encode(helping) else { return }
-        try? d.write(to: helpingFileURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: helpingFileURL.path)
-    }
-
-    public enum HelpError: Error, Equatable { case notALinkCode, ownLibrary, already }
-
-    /// Starts narrating for someone else's library from the link code their Mac shows.
-    public func startHelping(name: String, code: String) throws {
-        guard let config = AccountCode.parse(code)?.config else { throw HelpError.notALinkCode }
-        if let mine = currentBridgeConfig, mine.libraryKey == config.libraryKey { throw HelpError.ownLibrary }
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let h = HelpedLibrary(name: trimmed.isEmpty ? "Someone" : trimmed, url: config.url, libraryKey: config.libraryKey)
-        guard !helping.contains(where: { $0.id == h.id }) else { throw HelpError.already }
-        helping.append(h)
-        saveHelping()
-        runHelping(h)
-    }
-
-    /// Stops helping: its sync ends, and its books still here (unfinished or uncollected) go.
-    public func stopHelping(_ h: HelpedLibrary) {
-        if let run = helpingRuns.removeValue(forKey: h.id) { run.loop.cancel(); run.listener.stop() }
-        helping.removeAll { $0.id == h.id }
-        saveHelping()
-        helpingJobs[h.id] = nil
-        try? FileManager.default.removeItem(at: helpingStateURL(h))
-        for (id, owner) in guestBooks where owner == h.id { delete(id) }
-    }
-
-    private func helpingStateURL(_ h: HelpedLibrary) -> URL { support.appendingPathComponent("helping-\(h.id).json") }
-
-    private func startAllHelping() { for h in helping where helpingRuns[h.id] == nil { runHelping(h) } }
-
-    private func runHelping(_ h: HelpedLibrary) {
-        let sync = BridgeSync(config: h.config, deviceID: bridgeDeviceID, deviceName: server.serviceName, role: .helper,
-                              progress: progress, markers: markers, library: library, stateURL: helpingStateURL(h))
-        let listener = BridgeListener(config: h.config, deviceID: bridgeDeviceID) { [weak self] in
-            Task { @MainActor in self?.kickHelping(after: 2) }
-        }
-        let hid = h.id
-        let loop = Task { [weak self] in
-            await sync.configure(inbox: self?.server.inbox, onEPUB: { file, voice in
-                Task { @MainActor in
-                    guard let self, let id = try? DocumentDigest.sha256Prefix(of: file) else { return }
-                    if let voice { UserDefaults.standard.set(voice, forKey: "habla.voice.\(id)") }
-                    if self.allBooks.contains(where: { $0.id == id }) {
-                        // Already here (yours: it stays visible and is never deleted; or theirs,
-                        // sent again): narrate this copy.
-                        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-                        self.narrate(id)
-                    } else {
-                        self.guestBooks[id] = hid                // hidden before it exists on disk
-                        self.importFiles([file], fromPhone: true)
-                    }
-                }
-            }, onJobDone: { id in
-                Task { @MainActor in
-                    guard let self, self.guestBooks[id] == hid else { return }
-                    self.delete(id)                              // delivered: nothing of theirs stays
-                }
-            })
-            listener.start()
-            while !Task.isCancelled {
-                await self?.helpRound(sync, id: hid)
-                try? await Task.sleep(nanoseconds: 6 * 3600 * 1_000_000_000)
-            }
-            listener.stop()
-        }
-        helpingRuns[h.id] = (sync, loop, listener)
-    }
-
-    /// One round for a helped library: check in with this Mac's speed, take EPUBs sent to it,
-    /// pick up books whose narrator went quiet, send finished ones, let collected ones go.
-    private func helpRound(_ sync: BridgeSync, id hid: String) async {
-        do {
-            await sync.setNarrator(narratorStatus)
-            try await sync.syncState()
-            try await sync.receiveEPUBs()
-            for id in try await sync.retarget() { narrate(id) }
-            try await sync.publishNewBooks()
-            try await sync.collect()
-            helpingJobs[hid] = await sync.jobs.count
-            if await sync.hasBooksInTransit, !helpRechecks.contains(hid) {      // see runBridge
-                helpRechecks.insert(hid)
-                Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 330 * 1_000_000_000)
-                    self?.helpRechecks.remove(hid)
-                    await self?.helpRound(sync, id: hid)
-                }
-            }
-        } catch {
-            // Offline or a cap: the next round tries again.
-        }
-    }
-
-    /// The library changed (a guest book finished a chapter or the whole book): tell helped libraries.
-    func kickHelping(after seconds: Double = 5) {
-        guard !helpingRuns.isEmpty, helpingKick == nil else { return }
-        helpingKick = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            guard let self else { return }
-            self.helpingKick = nil
-            for (hid, run) in self.helpingRuns { await self.helpRound(run.sync, id: hid) }
-        }
-    }
-
-    /// Makes this Mac's own library on the bridge from someone's invite code (only when it has none).
-    public func startLibrary(invite code: String) async throws {
-        guard let invite = BridgeCode.parseInvite(code) else { throw HelpError.notALinkCode }
-        guard currentBridgeConfig == nil else { throw HelpError.already }
-        let key = BridgeKeys.newLibraryKey()
-        let keys = BridgeKeys(libraryKey: key)
-        try await BridgeClient(baseURL: invite.url, token: keys.token).enroll(tokenHash: keys.tokenHash, invite: invite.invite)
-        try? FileManager.default.createDirectory(at: bridgeFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        saveBridgeFile(BridgeFile(url: invite.url, libraryKey: key, enrollSecret: nil))
-        try? FileManager.default.removeItem(at: support.appendingPathComponent("bridge-state.json"))
-        startBridge()
-        objectWillChange.send()
-    }
-
-    /// A one-time code (7 days) for someone else's Mac to start its own library on this bridge.
-    public func makeInvite() async throws -> String {
-        guard let config = currentBridgeConfig else { throw HelpError.notALinkCode }
-        let invite = try await BridgeClient(baseURL: config.url, token: BridgeKeys(libraryKey: config.libraryKey).token).createInvite()
-        guard let code = BridgeCode.invite(.init(url: config.url, invite: invite)) else { throw HelpError.notALinkCode }
-        return code
-    }
-
-    private var currentBridgeConfig: BridgeConfig? {
-        guard let file = (try? Data(contentsOf: bridgeFileURL)).flatMap({ try? JSONDecoder().decode(BridgeFile.self, from: $0) }),
-              let key = file.libraryKey else { return nil }
-        return BridgeConfig(url: file.url, libraryKey: key)
-    }
-
-    /// An error message about a guest book, without its title.
-    nonisolated static func untitled(_ message: String, _ title: String) -> String {
-        message.replacingOccurrences(of: "“\(title)”", with: "it").replacingOccurrences(of: title, with: "it")
     }
 
     /// Sentences per second this Mac voices (measured while narrating; a guess until then).
@@ -581,33 +404,10 @@ public final class StudioStore: ObservableObject {
         return NarratorStatus(sentencesPerSecond: Self.narrationSpeed ?? 1.0, queuedSentences: queued, measured: Self.narrationSpeed != nil)
     }
 
-    /// A new book dropped on this Mac: narrate it here, or on the running device that finishes it first.
-    func narrateHereOrElsewhere(_ m: BookManifest) {
-        guard let bridge, BookLanguage.hasVoice(m.language) else { narrate(m.id); return }
-        let sentences = m.chapters.filter { $0.audioStatus == .pending }.reduce(0) { $0 + $1.sentenceCount }
-        let epub = BookImporter.originalURL(for: m.id, in: library)
-        let me = bridgeDeviceID
-        Task {
-            await bridge.setNarrator(narratorStatus)
-            try? await bridge.syncState()                              // fresh check-ins
-            guard let target = await bridge.chooseNarrator(sentences: sentences), target != me,
-                  FileManager.default.fileExists(atPath: epub.path) else { narrate(m.id); return }
-            do {
-                try await bridge.sendEPUB(epub, id: m.id, filename: m.title + ".epub", to: target)
-                narratingElsewhere[m.id] = await bridge.deviceName(target) ?? "another Mac"
-            } catch { narrate(m.id) }
-        }
-    }
-
-    /// Books another device is narrating (id → its name); they arrive with their audio.
-    @Published public private(set) var narratingElsewhere: [String: String] = [:]
-
     /// A reader window closed: its place and marks go out now.
     public func bookClosed() { Task { await runBridge() } }
 
-    /// A book finished narrating or a setting changed: run the bridge a minute later (coalesced).
-    private var transitCheck: Task<Void, Never>?
-    private var helpRechecks: Set<String> = []
+    /// A book finished narrating or a setting changed: a round a few seconds later (coalesced).
 
     func kickBridge(after seconds: Double = 5) {
         guard bridge != nil, bridgeKick == nil else { return }
@@ -648,38 +448,6 @@ public final class StudioStore: ObservableObject {
     }
 
     public func stopPairing() { pairingWindow.close(); refreshPairing() }
-
-    private var joinTask: Task<Void, Never>?
-
-    /// No account yet: keeps a fresh join QR code on screen (a new one when it expires or is
-    /// used up) until an iPhone hands this Mac its account.
-    public func showJoinCode() {
-        joinTask?.cancel()
-        joinTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self, self.currentBridgeConfig == nil else { break }
-                if self.pairingWindow.current == nil { self.pairingWindow.open() }
-                self.refreshPairing()
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-            }
-            self?.pairingWindow.close()
-            self?.refreshPairing()
-        }
-    }
-
-    public func hideJoinCode() { joinTask?.cancel(); joinTask = nil; stopPairing() }
-
-    /// An iPhone scanned the join QR code and handed over its account.
-    func adoptAccount(_ config: BridgeConfig, name: String?) {
-        guard currentBridgeConfig == nil else { return }
-        try? FileManager.default.createDirectory(at: bridgeFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        saveBridgeFile(BridgeFile(url: config.url, libraryKey: config.libraryKey, enrollSecret: nil))
-        if let name { accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName") }
-        try? FileManager.default.removeItem(at: support.appendingPathComponent("bridge-state.json"))
-        hideJoinCode()
-        startBridge()
-        objectWillChange.send()
-    }
 
     public func forget(_ device: PairedDevice) {
         registry.forget(device.id)
@@ -737,14 +505,7 @@ public final class StudioStore: ObservableObject {
         serving = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
                                                         reason: "Sharing your library with your iPhone")
         server.onInbox = { [weak self] file in
-            Task { @MainActor in
-                // Your iPhone added a book this Mac narrates for someone else: it's yours too now.
-                if let self, let id = try? DocumentDigest.sha256Prefix(of: file), self.guestBooks[id] != nil {
-                    self.guestBooks[id] = nil
-                    self.narrate(id)
-                }
-                self?.importFiles([file], fromPhone: true)
-            }
+            Task { @MainActor in self?.importFiles([file], fromPhone: true) }
         }
         importInboxLeftovers()
         server.onDevice = { [weak self] _ in
@@ -755,19 +516,17 @@ public final class StudioStore: ObservableObject {
             }
         }
         pairingWindow.onChange = { [weak self] in Task { @MainActor in self?.refreshPairing() } }
-        server.onJoin = { [weak self] config, name in Task { @MainActor in self?.adoptAccount(config, name: name) } }
-        if !helperOnly { startServer() }                 // a helper doesn't share a library on Wi-Fi
+        startServer()
         // The Xteink reads the Mac's places and sends its own here; they go on to the account
-        // right away (it has no account of its own). A helper Mac keeps out of it.
+        // right away (it has no account of its own).
         server.onEReaderPosition = { [weak self] _ in
             Task { @MainActor in self?.reload(); self?.kickBridge(after: 2) }
         }
-        if Features.xteink && !helperOnly { startXteinkWatcher() }
+        if Features.xteink { startXteinkWatcher() }
         startLibraryWatcher()
         resumeUnfinished()
         upgradeAudioFormat()
         startBridge()
-        startAllHelping()
     }
 
     private func startServer() {
@@ -800,11 +559,9 @@ public final class StudioStore: ObservableObject {
     }
 
     public func reload() {
-        allBooks = server.allManifests()
-        books = allBooks.filter { guestBooks[$0.id] == nil }
-        for (id, _) in narratingElsewhere where books.first(where: { $0.id == id })?.isFullyRendered == true { narratingElsewhere[id] = nil }
-        let after = allBooks.map { "\($0.id):\($0.revision)" }
-        if after != lastLibraryStamp { lastLibraryStamp = after; kickBridge(); kickHelping() }
+        books = server.manifests()
+        let after = books.map { "\($0.id):\($0.revision)" }
+        if after != lastLibraryStamp { lastLibraryStamp = after; kickBridge() }
         if selection == nil || !books.contains(where: { $0.id == selection }) { selection = books.first?.id }
     }
 
@@ -836,7 +593,6 @@ public final class StudioStore: ObservableObject {
 
     /// `fromPhone`: sent by the iPhone — no alerts for duplicates, and the inbox copy is removed afterwards.
     public func importFiles(_ urls: [URL], fromPhone: Bool = false) {
-        guard fromPhone || !helperOnly else { alert = "This Mac only helps narrate. Add books on your other devices."; return }
         let epubs = urls.filter { $0.pathExtension.lowercased() == "epub" }
         let rejected = urls.count - epubs.count
         guard !epubs.isEmpty else {
@@ -881,14 +637,17 @@ public final class StudioStore: ObservableObject {
             }
             await MainActor.run {
                 self.reload()
-                if let bridge = self.bridge { let ids = added.map(\.id); Task { for id in ids { await bridge.recordAdded(id) } } }
                 if let first = added.first { self.selection = first.id }
-                // Books from the iPhone are always narrated: nobody is at the Mac to start them.
-                // A book sent here to narrate (from the iPhone or the other Mac) is narrated here;
-                // one dropped on this Mac goes to whichever running device finishes it first.
-                if fromPhone { for m in added { self.narrate(m.id) } }
-                else if self.autoNarrate { for m in added { self.narrateHereOrElsewhere(m) } }
-                if !added.isEmpty { self.kickBridge(after: 2) }   // the text goes to every device now
+                // In an account, the account decides who narrates (usually this Mac) and offers the
+                // book to every device. Without one (or offline a while), this Mac narrates it.
+                if let bridge = self.bridge, self.accountDecides {
+                    let ids = added.map(\.id)
+                    Task { for id in ids { await bridge.recordAdded(id) }; self.kickBridge(after: 1) }
+                } else {
+                    if let bridge = self.bridge { let ids = added.map(\.id); Task { for id in ids { await bridge.recordAdded(id) } } }
+                    if fromPhone || self.autoNarrate { for m in added { self.narrate(m.id) } }
+                    if !added.isEmpty { self.kickBridge(after: 2) }
+                }
                 if !added.isEmpty { self.kickXteink() }
                 var lines: [String] = []
                 if !duplicates.isEmpty && !fromPhone { lines.append("Already in your library: \(duplicates.joined(separator: ", ")).") }
@@ -916,7 +675,7 @@ public final class StudioStore: ObservableObject {
 
     /// `everywhere`: the user deleted it, so it goes from every device of the account too.
     public func delete(_ id: String, everywhere: Bool = false) {
-        if everywhere, guestBooks[id] == nil {
+        if everywhere {
             removeFromXteink(id)
             if let bridge { Task { await bridge.recordDeleted(id); kickBridge() } }
         }
@@ -932,7 +691,6 @@ public final class StudioStore: ObservableObject {
             try? FileManager.default.removeItem(at: BookImporter.originalURL(for: id, in: library))
             progress.remove(id)
             var s = stopped; s.remove(id); stopped = s
-            if guestBooks[id] != nil { guestBooks[id] = nil }   // files gone: nothing left to hide
             deleting.remove(id)
             reload()
             pump()
@@ -998,12 +756,6 @@ public final class StudioStore: ObservableObject {
         queue.removeAll { $0 == id }
     }
 
-    /// Books received from another device while it narrates them: not narrated here at launch.
-    private var narratedElsewhere: Set<String> {
-        get { Set(UserDefaults.standard.stringArray(forKey: "habla.narratedElsewhere") ?? []) }
-        set { UserDefaults.standard.set(Array(newValue), forKey: "habla.narratedElsewhere") }
-    }
-
     /// Re-saves audio made with the older, larger setting as HE-AAC 24 kbps (about a third of
     /// the size), one book at a time in the background. Books being narrated are left for later.
     private func upgradeAudioFormat() {
@@ -1021,7 +773,9 @@ public final class StudioStore: ObservableObject {
     }
 
     private func resumeUnfinished() {
-        let skip = stopped.union(narratedElsewhere)
+        // In an account, only what the account gave this Mac (it decides who narrates).
+        let decides = accountDecides, mine = assignedHere
+        let skip = stopped.union(decides ? Set(allBooks.map(\.id)).subtracting(mine) : [])
         // Only languages with a voice may be narrated: a French/Hindi/German book narrated in an
         // earlier version must keep playing its existing audio, never be re-narrated in English.
         for m in allBooks where m.canNarrate && m.voice != nil && !m.chaptersToNarrate(voiceID: voice(for: m)).isEmpty
@@ -1105,7 +859,6 @@ public final class StudioStore: ObservableObject {
                 if finished { self.renarrating.remove(id) }
                 self.retryingGaps.remove(id)                      // one try per request: no loop
                 if var failure {
-                    if self.guestBooks[id] != nil { failure = "A book you're narrating for someone else: " + StudioStore.untitled(failure, m.title) }
                     self.alert = finished ? failure : "Narration stopped: \(failure)"
                     if !finished { self.paused = true; self.pauseReason = "stopped after an error. Choose Resume to try again"; return }
                 }
@@ -1291,7 +1044,7 @@ public final class StudioStore: ObservableObject {
     }
 
     func removeFromXteink(_ id: String) {
-        guard Features.xteink, !helperOnly, books.contains(where: { $0.id == id }) else { return }
+        guard Features.xteink, books.contains(where: { $0.id == id }) else { return }
         var r = xteinkRemovals; r.insert(id); xteinkRemovals = r
         kickXteink()
     }
@@ -1381,12 +1134,4 @@ public final class StudioStore: ObservableObject {
     }
 }
 
-/// Ids of guest books, readable from the server's queue and the bridge actor.
-final class HiddenIDs: @unchecked Sendable {
-    private let lock = NSLock()
-    private var ids: Set<String> = []
-    func set(_ new: Set<String>) { lock.withLock { ids = new } }
-    func contains(_ id: String) -> Bool { lock.withLock { ids.contains(id) } }
-    var all: Set<String> { lock.withLock { ids } }
-}
 #endif

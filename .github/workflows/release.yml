@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 45
     env:
       BUILD_NUMBER: ${{ github.run_number }}
+      HABLA_BRIDGE_URL: ${{ secrets.HABLA_BRIDGE_URL }}
     steps:
       - uses: actions/checkout@v5
 

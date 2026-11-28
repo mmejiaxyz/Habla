@@ -61,9 +61,9 @@ public struct SyncResult: Sendable, Equatable {
 }
 
 public actor AccountSync {
-    public let client: BridgeClient
+    public nonisolated let client: BridgeClient
     let keys: BridgeKeys
-    public let config: BridgeConfig
+    public nonisolated let config: BridgeConfig
     /// This device's own id (e.g. "mac-…") and the opaque id the account knows it by.
     public let deviceID: String
     public let serverID: String
@@ -133,7 +133,25 @@ public actor AccountSync {
         client = BridgeClient(baseURL: config.url, token: keys.token, device: serverID, session: session)
         self.deviceID = deviceID; self.deviceName = deviceName; self.kind = kind
         self.progress = progress; self.markers = markers; self.library = library; self.stateURL = stateURL
-        saved = (try? Data(contentsOf: stateURL)).flatMap { try? JSON.decoder.decode(Saved.self, from: $0) } ?? Saved()
+        if let d = try? Data(contentsOf: stateURL), let s = try? JSON.decoder.decode(Saved.self, from: d) {
+            saved = s
+        } else {
+            saved = Saved()
+            importLegacy(stateURL.deletingLastPathComponent().appendingPathComponent("bridge-state.json"))
+        }
+    }
+
+    /// The first start after the v1 bridge: its deletions and "Remove download"s carry over, so a
+    /// book deleted before doesn't come back from a device that still has it.
+    func importLegacy(_ url: URL) {
+        struct Event: Decodable { var bookID: String; var deleted: Bool; var at: Date }
+        struct Old: Decodable { var ledger: [String: Event]?; var declined: Set<String>?; var settings: OldSettings? }
+        struct OldSettings: Decodable { var voice: String?; var changedAt: Date?; var name: String?; var nameChangedAt: Date? }
+        guard let d = try? Data(contentsOf: url), let old = try? JSON.decoder.decode(Old.self, from: d) else { return }
+        for e in (old.ledger ?? [:]).values where e.deleted { saved.deletions[e.bookID] = e.at }
+        saved.declined = old.declined ?? []
+        if let v = old.settings?.voice, let at = old.settings?.changedAt { saved.settings.voice = v; saved.settings.voiceAt = at }
+        if let n = old.settings?.name { saved.settings.name = n; saved.settings.nameAt = old.settings?.nameChangedAt ?? Date() }
     }
 
     // MARK: - Setting up
@@ -181,6 +199,10 @@ public actor AccountSync {
     /// Books of the account not here yet (or with more audio in the cloud).
     public func offers() -> [OfferedBook] { saved.offers }
     public func isDeclined(_ id: String) -> Bool { saved.declined.contains(id) }
+    /// Where the account's Macs serve books on Wi-Fi (host:port), most recently seen first.
+    public func macEndpoints() -> [String] {
+        saved.devices.filter { $0.kind == .mac }.sorted { $0.lastSeen > $1.lastSeen }.flatMap(\.endpoints)
+    }
 
     /// Changed in Settings here: it becomes every device's.
     public func setVoice(_ voice: String) {
@@ -459,6 +481,17 @@ public actor AccountSync {
                 } catch BridgeError.http(404) {
                     continue                                    // replaced meanwhile: next round
                 }
+            }
+            // The EPUB is here but not the book (removed earlier, asked for again): rebuild it.
+            let original = BookImporter.originalURL(for: id, in: library)
+            if hasOriginal(id), !fm.fileExists(atPath: bundleURL.appendingPathComponent(BookBundle.manifestFile).path) {
+                let named = fm.temporaryDirectory.appendingPathComponent("habla-\(UUID().uuidString)", isDirectory: true)
+                try? fm.createDirectory(at: named, withIntermediateDirectories: true)
+                let src = named.appendingPathComponent(Self.safeName(meta.title) + ".epub")
+                if (try? fm.copyItem(at: original, to: src)) != nil, (try? BookImporter().importEPUB(at: src, into: library)) != nil {
+                    result.arrived.append(id); changed = true
+                }
+                try? fm.removeItem(at: named)
             }
             // The audio, onto the text built here.
             guard let a = b.audio, !busy.contains(id), !skipAudio.contains(id),

@@ -40,13 +40,13 @@ public final class PhoneStore: ObservableObject {
     public let deviceID: String
     /// When the cloud bridge last synced (away from home), for the status line.
     @Published public private(set) var bridgeSynced: Date?
-    private var bridgeSync: BridgeSync?
+    private var bridgeSync: AccountSync?
     private var bridgeRan: Date?
+    /// The account's other devices, as the account last told this iPhone.
+    @Published public private(set) var accountDevices: [AccountDevice] = []
     /// One bridge sync at a time; a forced one asked for meanwhile runs right after.
     private var bridgeSyncing = false
     private var bridgeAgain = false
-    /// Books being routed now (so two syncs never send the same book twice).
-    private var routing: Set<String> = []
     var remote: [LibraryEntry] = []
     var downloading: [String: Double] = [:]
     var cloudManifests: [String: BookManifest] = [:]
@@ -233,8 +233,9 @@ public final class PhoneStore: ObservableObject {
             let addedIDs = added, failedNames = failed
             await MainActor.run {
                 self.importing -= epubs.count
-                for id in addedIDs where !self.outbox.contains(id) && !self.remote.contains(where: { $0.id == id }) {
-                    self.outbox.append(id)
+                // No account: the Mac on this Wi-Fi gets the EPUB directly (the outbox).
+                if !self.hasAccount {
+                    for id in addedIDs where !self.outbox.contains(id) && !self.remote.contains(where: { $0.id == id }) { self.outbox.append(id) }
                 }
                 self.deletedIDs.subtract(addedIDs)
                 let bridge = self.bridge
@@ -243,14 +244,13 @@ public final class PhoneStore: ObservableObject {
                 if !failedNames.isEmpty { self.error = "Couldn't open \(failedNames.joined(separator: ", ")). Is it a DRM-free EPUB?" }
                 Task {
                     if self.bridge != nil {
-                        // The running device that finishes it first narrates it (often a Mac).
-                        try? await self.bridge?.syncState()
-                        for id in addedIDs { await self.route(id) }
+                        // The account offers it to every device and decides who narrates it.
+                        await self.syncBridge(atHome: self.client != nil, force: true)
                     } else {
-                        // No bridge: narrate here when this iPhone has the voice; the Mac still gets the book.
+                        // No account: narrate here when this iPhone has the voice; the Mac still gets the book.
                         for id in addedIDs where self.canNarrateOnPhone(id) { self.narrateOnPhone(id) }
+                        await self.sendOutbox()
                     }
-                    await self.sendOutbox()
                 }
             }
         }
@@ -265,11 +265,10 @@ public final class PhoneStore: ObservableObject {
     /// Sends waiting books to the Mac (runs on every sync too; quietly waits while it's away).
     func sendOutbox() async {
         guard !outbox.isEmpty else { return }
-        // Arrived on the Mac: now the iPhone's copy of the original can go.
+        // Arrived on the Mac (the EPUB stays here too: it's the book).
         for id in outbox where remote.contains(where: { $0.id == id }) {
             outbox.removeAll { $0 == id }
             sentAt[id] = nil
-            try? FileManager.default.removeItem(at: BookImporter.originalURL(for: id, in: library))
         }
         guard let client else { return }
         for id in outbox {
@@ -337,10 +336,7 @@ public final class PhoneStore: ObservableObject {
                 self.phoneQueue.removeFirst()
                 self.phoneNarration[id] = nil
                 self.reloadLocal()
-                if self.manifest(id)?.isFullyRendered == true, let bridge = self.bridge {
-                    await bridge.markNarratedHere(id)            // the Macs get it with its audio
-                    Task { await self.syncBridge(atHome: self.client != nil, force: true) }
-                }
+                if self.bridge != nil { Task { await self.syncBridge(atHome: self.client != nil, force: true) } }   // its audio goes out
             }
             await engine.shutdown()   // frees the model's memory
             self?.phoneTask = nil
@@ -422,9 +418,9 @@ public final class PhoneStore: ObservableObject {
         schedulePush()
     }
 
-    // MARK: Cloud bridge (away from home)
+    // MARK: Account (Docs/cloud-bridge.md)
 
-    /// The account (Keychain, this device only): bridge URL + library key.
+    /// The account (Keychain, this device only): the Worker's address + the account key.
     var accountConfig: BridgeConfig? {
         guard let s = Keychain.get("account") else { return nil }
         return try? JSONDecoder().decode(BridgeConfig.self, from: Data(s.utf8))
@@ -439,19 +435,46 @@ public final class PhoneStore: ObservableObject {
         Keychain.delete(mac.libraryID)
     }
 
-    /// The account's QR code (a habla://account link). It works like a password.
-    public var accountLink: URL? { accountConfig.map { AccountCode.url($0, name: accountName) } }
+    /// The Worker's address: built into the app (`HablaBridgeURL`), else the account's.
+    public var bridgeURL: URL? {
+        if let s = Bundle.main.object(forInfoDictionaryKey: "HablaBridgeURL") as? String, let u = URL(string: s), u.scheme == "https" { return u }
+        return accountConfig?.url
+    }
 
-    /// Joins the account from its QR code (Camera → habla://account) or pasted code.
+    @Published public private(set) var joining: String?
+    @Published public var notice: String?
+
+    /// Joins an account with a one-time code (typed, or from a QR code with the Worker's address).
     @discardableResult
-    public func joinAccount(_ text: String) -> Bool {
-        guard let (config, name) = AccountCode.parse(text), let d = try? JSONEncoder().encode(config) else {
-            error = "That isn’t a Habla account code."
+    public func joinAccount(code typed: String, server: URL? = nil) async -> Bool {
+        guard let code = JoinCode(typed) else { error = "That isn’t a code. It looks like XXXX-XXXX-XXXX."; return false }
+        guard let url = server ?? bridgeURL else {
+            error = "Scan the QR code on your Mac instead (Account → Add a device)."
             return false
         }
+        joining = "your account"
+        defer { joining = nil }
+        do {
+            let (config, name) = try await AccountSync.join(code, at: url)
+            adopt(config, name: name)
+            notice = "This iPhone joined \(name ?? "your account")."
+            return true
+        } catch BridgeError.http(404) {
+            error = "That code didn’t work: it was used, it expired (after 15 minutes), or a character is off."
+        } catch BridgeError.corrupt {
+            error = "That code didn’t work: it was used, it expired (after 15 minutes), or a character is off."
+        } catch {
+            self.error = Self.describe(error)
+        }
+        return false
+    }
+
+    private func adopt(_ config: BridgeConfig, name: String?) {
+        guard let d = try? JSONEncoder().encode(config) else { return }
         if config != accountConfig {
             Keychain.set(String(decoding: d, as: UTF8.self), for: "account")
             bridgeSync = nil
+            try? FileManager.default.removeItem(at: accountStateURL)
             homeMac = nil; savePaired()
             remote = []
             connection = .searching
@@ -463,64 +486,58 @@ public final class PhoneStore: ObservableObject {
         error = nil
         reloadLocal()
         start()
-        return true
     }
 
-    /// A habla:// link from the Camera or the in-app scanner: an account to join, or a Mac
-    /// (without an account) asking for this iPhone's account.
+    /// A habla:// link from the Camera or the in-app scanner: a one-time code to join.
     public func handleLink(_ url: URL) {
+        if let (code, server) = JoinCode.parse(link: url) {
+            Task { await joinAccount(code: code.raw, server: server) }
+            return
+        }
         switch url.host {
-        case "account": joinAccount(url.absoluteString)
-        case "join":
-            if let invite = PairingInvite(url: url) { Task { await giveAccount(to: invite) } }
+        case "account": error = "That’s an old account code. On a device already in your account, open Account → Add a device."
         case "pair": error = "That’s an old pairing code. Update Habla on your Mac."
         default: error = "That isn’t a Habla code."
         }
     }
 
-    @Published public private(set) var joining: String?
-    @Published public var notice: String?
+    /// A one-time code on screen for a new device (Add a device).
+    public struct ShownCode: Equatable {
+        public var code: String
+        public var link: URL
+        public var expires: Date
+    }
+    @Published public private(set) var shownCode: ShownCode?
 
-    /// Hands this iPhone's account to the Mac whose join QR code was scanned: over Wi-Fi,
-    /// pinned to the certificate in the QR code, proving the one-time code.
-    public func giveAccount(to invite: PairingInvite) async {
-        guard let link = accountLink else {
-            error = "This iPhone isn’t in an account yet. Scan the QR code on a Mac that has one."
-            return
-        }
-        let macName = invite.name.replacingOccurrences(of: "Habla on ", with: "")
-        joining = macName
-        defer { joining = nil }
-        var url = nearby.first { $0.libraryID == invite.libraryID }?.url
-        for _ in 0..<20 where url == nil {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            url = nearby.first { $0.libraryID == invite.libraryID }?.url
-        }
-        if url == nil, let a = invite.address { url = URL(string: "https://\(a)") }
-        guard let url else { error = "Couldn’t find \(macName). Is this iPhone on the same Wi-Fi?"; return }
-        let session = PinnedTrust(fingerprint: invite.fingerprint).session()
+    public func showJoinCode() async {
+        guard let bridge else { return }
         do {
-            try await SyncClient(baseURL: url, session: session)
-                .join(code: invite.code, fingerprint: invite.fingerprint, deviceID: deviceID, deviceName: deviceName, account: link)
-            error = nil
-            notice = "\(macName) joined \(accountName ?? "your account")."
-            // The Mac restarts sharing with the account: connect once it's back.
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            await connectNearby()
-            await syncAccount()
+            let code = try await bridge.makeJoinCode()
+            shownCode = ShownCode(code: code.display, link: code.link(bridge: bridge.config.url), expires: Date().addingTimeInterval(15 * 60))
         } catch {
-            self.error = Self.describe(error)
+            self.error = "Couldn’t make a code: \(Self.describe(error))"
         }
     }
+    public func hideJoinCode() { shownCode = nil }
+
+    /// Removes a device from the account (one that was wiped or replaced).
+    public func forgetDevice(_ d: AccountDevice) {
+        guard let bridge else { return }
+        accountDevices.removeAll { $0.id == d.id }
+        Task { try? await bridge.removeDevice(d.id); accountDevices = await bridge.devices() }
+    }
+
+    var accountStateURL: URL { library.deletingLastPathComponent().appendingPathComponent("account-state.json") }
 
     /// Leaves the account on this iPhone (downloaded books stay).
     public func leaveAccount() {
         Keychain.delete("account")
         UserDefaults.standard.removeObject(forKey: "habla.accountName")
-        try? FileManager.default.removeItem(at: library.deletingLastPathComponent().appendingPathComponent("bridge-state.json"))
+        try? FileManager.default.removeItem(at: accountStateURL)
         accountName = nil
         hasAccount = false
         bridgeSync = nil
+        accountDevices = []
         homeMac = nil; savePaired()
         remote = []
         connection = .searching
@@ -528,12 +545,11 @@ public final class PhoneStore: ObservableObject {
         reloadLocal()
     }
 
-    var bridge: BridgeSync? {
+    var bridge: AccountSync? {
         if let bridgeSync { return bridgeSync }
         guard let config = accountConfig else { return nil }
-        let b = BridgeSync(config: config, deviceID: deviceID, deviceName: deviceName, role: .phone, progress: progress,
-                           markers: markers, library: library,
-                           stateURL: library.deletingLastPathComponent().appendingPathComponent("bridge-state.json"))
+        let b = AccountSync(config: config, deviceID: deviceID, deviceName: deviceName, kind: .phone, progress: progress,
+                            markers: markers, library: library, stateURL: accountStateURL)
         bridgeSync = b
         Task {
             await b.configure(log: { [weak self] msg in Task { @MainActor in self?.bridgeStatus = msg } })
@@ -571,38 +587,14 @@ public final class PhoneStore: ObservableObject {
         return NarratorStatus(sentencesPerSecond: Self.narrationSpeed ?? 0.2, queuedSentences: queued, measured: Self.narrationSpeed != nil)
     }
 
-    /// Sends a new book to whichever running device would finish narrating it first: the paired
-    /// Mac over Wi-Fi, the other Mac through the bridge, or this iPhone when no Mac is running.
-    func route(_ id: String) async {
-        guard let bridge, let m = manifest(id), !routing.contains(id) else { return }
-        guard BookLanguage.hasVoice(m.language) else { return }
-        routing.insert(id)
-        defer { routing.remove(id) }          // read-only languages: the Mac just needs the text
-        let sentences = m.chapters.filter { $0.audioStatus == .pending }.reduce(0) { $0 + $1.sentenceCount }
-        await bridge.setNarrator(narratorStatus)
-        guard let target = await bridge.chooseNarrator(sentences: sentences) else { return }   // nobody: keep the outbox
-        if target == deviceID {
-            outbox.removeAll { $0 == id }            // narrated here, then sent to the Macs with its audio
-            narrateOnPhone(id)
-        } else if let mac = homeMac, target == "mac-" + mac.libraryID, client != nil {
-            return                                    // the paired Mac, right here on Wi-Fi: the outbox sends it
-        } else {
-            let epub = BookImporter.originalURL(for: id, in: library)
-            guard FileManager.default.fileExists(atPath: epub.path) else { return }
-            if (try? await bridge.sendEPUB(epub, id: id, filename: m.title + ".epub", to: target)) != nil {
-                outbox.removeAll { $0 == id }
-            }
-        }
-    }
-
     /// Bookmarks and underlines changed: the Mac at home gets them now (Wi-Fi, free); the
-    /// bridge gets them with the place when the book or the app closes.
+    /// account gets them with the place when the book or the app closes.
     public func markersChanged() {
         Task { if let client { try? await client.syncMarkers(markers) } }
     }
 
     /// A book (reader or player) closed, or Habla went to the background: the place and marks go
-    /// to the bridge now, and only now.
+    /// to the account now, and only now.
     public func bookClosed() {
         guard bridge != nil else { return }
         #if canImport(UIKit)
@@ -616,7 +608,7 @@ public final class PhoneStore: ObservableObject {
         }
     }
 
-    /// "Sync now": the account's cloud side too.
+    /// "Sync now": the account's side too.
     public func syncAccount() async { await syncBridge(atHome: client != nil, force: true) }
 
     /// Habla opened: what changed elsewhere (places, marks, new books) comes in.
@@ -628,11 +620,12 @@ public final class PhoneStore: ObservableObject {
         }
     }
 
-    /// The account's voice (same on every device; set on the Mac).
+    /// The account's voice (same on every device).
     var accountVoice: String { UserDefaults.standard.string(forKey: "habla.voice") ?? "af_heart" }
 
-    /// Away from the Mac: places, markers, new books and EPUBs go through the bridge.
-    /// At home only places and markers are mirrored (books come over Wi-Fi, faster).
+    /// One round with the account: places and marks, the books it offers (EPUBs become books
+    /// here; audio arrives on Wi-Fi, or on mobile data once you say yes), what it asks this
+    /// iPhone to send, and what it gives this iPhone to narrate (only when no Mac is around).
     func syncBridge(atHome: Bool, force: Bool = false) async {
         guard let bridge else { return }
         if bridgeSyncing { if force { bridgeAgain = true }; return }
@@ -645,58 +638,35 @@ public final class PhoneStore: ObservableObject {
         }
         do {
             await bridge.setNarrator(narratorStatus)
-            // Asks for missing books only while on screen and away from the home Mac (there they
-            // come over Wi-Fi). Not asking any more: the sender deletes its copy on the bridge.
-            // At home, books only another Mac has (one not on this Wi-Fi) still come over the cloud.
-            if atHome {
-                let here = Set(remote.map(\.id))
-                await bridge.setAsking(isForeground, except: here)
-            } else {
-                await bridge.setAsking(isForeground && !atHome, except: [])
-            }
-            try await bridge.syncState()
-            await refreshIncoming(bridge)
-            UserDefaults.standard.set(await bridge.settings.voice, forKey: "habla.voice")
-            if let name = await bridge.settings.name, name != accountName {
-                accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName")
-            }
+            await bridge.setBusy(Set(phoneQueue.prefix(1)))
+            let wifi = onCheapNetwork.value || atHome
+            let downloads: AccountSync.Downloads = !isForeground ? .none : (wifi ? .all : .only(allowedOnMobile))
+            // At home, the Mac on this Wi-Fi brings its books' audio (faster, free).
+            let r = try await bridge.sync(downloads: downloads, uploads: true, skipAudio: atHome ? Set(remote.map(\.id)) : [])
+            let s = await bridge.settings
+            if s.voiceAt.timeIntervalSince1970 > 0 { UserDefaults.standard.set(s.voice, forKey: "habla.voice") }
+            if let name = s.name, name != accountName { accountName = name; UserDefaults.standard.set(name, forKey: "habla.accountName") }
             // Deleted on another device: deleted here too.
             var goneTitles: [String] = []
-            for id in await bridge.booksDeletedElsewhere() {
+            for id in r.deleted {
                 if let m = manifest(id) { goneTitles.append(m.title) }
                 try? FileManager.default.removeItem(at: BookBundle.url(for: id, in: library))
                 try? FileManager.default.removeItem(at: BookImporter.originalURL(for: id, in: library))
                 outbox.removeAll { $0 == id }
                 progress.remove(id)
+                deletedIDs.insert(id)
             }
             if let first = goneTitles.first {
                 show(goneTitles.count == 1 ? "“\(first)” was deleted on another of your devices, so it’s gone here too."
                                           : "\(goneTitles.count) books were deleted on your other devices, so they’re gone here too.")
             }
-            deletedIDs = await bridge.deletedIDs
-            reloadLocal()
-            let arrived = await bridge.booksOnMac()
-            for id in outbox where arrived.contains(id) {
-                outbox.removeAll { $0 == id }; sentAt[id] = nil
-                try? FileManager.default.removeItem(at: BookImporter.originalURL(for: id, in: library))
-            }
-            // Away from the paired Mac, books waiting for it go to the best running device instead.
-            if !atHome { for id in outbox { await route(id) } }
-            // Books narrated elsewhere (either Mac, or this iPhone's earlier work) arrive with audio.
-            // Mobile data: only books the user said yes to come in (sending costs nothing to wait for).
-            let got = try await bridge.receiveBooks(only: onCheapNetwork.value || client != nil ? nil : allowedOnMobile)
-            allowedOnMobile.subtract(got)
-            for id in got { downloading[id] = nil }
-            if !got.isEmpty { try? await bridge.syncState() }          // says "got it": the copy there goes now
-            await refreshIncoming(bridge)
+            allowedOnMobile.subtract(r.arrived)
+            for id in r.arrived { downloading[id] = nil }
+            for id in r.narrate where canNarrateOnPhone(id) { narrateOnPhone(id) }
+            accountDevices = await bridge.devices()
             narratingOn = await bridge.narratingDevices()
             cloudPausedUntil = await bridge.pausedUntil
-            if !got.isEmpty { reloadLocal() }
-            for id in try await bridge.retarget() where canNarrateOnPhone(id) { narrateOnPhone(id) }
-            // On the Mac's Wi-Fi, or any non-mobile network: books this iPhone holds go out.
-            // Any network: what this iPhone adds goes out at once, mobile data included.
-            try await bridge.publishNewBooks(uploads: true)
-            try await bridge.collect()
+            await refreshIncoming(bridge, wifi: wifi)
             bridgeSynced = Date()
             if bridgeStatus?.hasPrefix("Cloud sync stopped") == true { bridgeStatus = nil }
             pollWhileWaiting()
@@ -708,24 +678,20 @@ public final class PhoneStore: ObservableObject {
         reloadLocal()
     }
 
-    /// What's on its way, for the library (titles once the sender has uploaded them).
-    private func refreshIncoming(_ bridge: BridgeSync) async {
-        let incoming = await bridge.incoming()
-        for (id, m) in incoming { if let m { cloudManifests[id] = m } }
-        let wifi = onCheapNetwork.value || client != nil
-        let next = incoming.map { item -> CloudIncoming in
-            let m = item.manifest ?? cloudManifests[item.id]
-            let have = Set((self.manifest(item.id)?.files ?? []).map(\.sha256))
-            let bytes = m.map { $0.files.filter { !have.contains($0.sha256) }.reduce(0) { $0 + $1.size } }
-            return CloudIncoming(id: item.id, title: m?.title, fraction: downloading[item.id], bytes: bytes,
-                                 waitsForWiFi: !wifi && !allowedOnMobile.contains(item.id))
+    /// What's on its way, for the library (the account's books this iPhone doesn't have yet).
+    private func refreshIncoming(_ bridge: AccountSync, wifi: Bool) async {
+        let offers = await bridge.offers()
+        for o in offers where cloudManifests[o.id] == nil { cloudManifests[o.id] = .offered(id: o.id, title: o.title, author: o.author) }
+        let next = offers.map { o in
+            CloudIncoming(id: o.id, title: o.title, fraction: downloading[o.id], bytes: nil,
+                          waitsForWiFi: !wifi && !allowedOnMobile.contains(o.id) && (o.epubReady || o.audioChapters > 0))
         }
         if next != cloudIncoming { cloudIncoming = next }
         if next.isEmpty { waitingSince = nil } else if waitingSince == nil { waitingSince = Date() }
     }
 
-    /// While a book is on its way and Habla is on screen, look again every few seconds (the Mac
-    /// is uploading it); give up after 15 minutes so a Mac that's off costs nothing.
+    /// While a book is on its way and Habla is on screen, look again every few seconds (a Mac
+    /// is sending it); give up after 15 minutes so a Mac that's off costs nothing.
     private func pollWhileWaiting() {
         guard cloudPoll == nil, isForeground, !cloudIncoming.isEmpty,
               Date().timeIntervalSince(waitingSince ?? Date()) < 15 * 60 else { return }
@@ -738,8 +704,7 @@ public final class PhoneStore: ObservableObject {
         }
     }
 
-    /// Habla went to the background (stops asking: the cloud copy of anything not yet
-    /// downloaded is deleted) or came back (asks again).
+    /// Habla went to the background (downloads wait) or came back.
     public func setForeground(_ on: Bool) {
         isForeground = on
         if !on { cloudPoll?.cancel(); cloudPoll = nil; waitingSince = nil }
@@ -864,7 +829,7 @@ public final class PhoneStore: ObservableObject {
         var candidates: [URL] = []
         if let u = homeMac?.lastURL { candidates.append(u) }
         candidates += knownMacURLs.compactMap(URL.init(string:))
-        if let bridge { candidates += await bridge.macEndpoints().flatMap { $0.endpoints }.compactMap { URL(string: "https://" + $0) } }
+        if let bridge { candidates += await bridge.macEndpoints().compactMap { URL(string: "https://" + $0) } }
         var seen = Set<String>()
         candidates = candidates.filter { seen.insert($0.absoluteString).inserted }
         guard !candidates.isEmpty else { return }

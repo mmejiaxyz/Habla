@@ -35,6 +35,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>HablaBridgeURL</key>
+	<string>$(HABLA_BRIDGE_URL)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.books</string>
 	<key>NSAppTransportSecurity</key>

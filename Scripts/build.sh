@@ -8,7 +8,12 @@
 set -euo pipefail
 ROOT="${0:A:h:h}"
 BUILD_NUMBER="${BUILD_NUMBER:-0}"
-VERSIONS=(CURRENT_PROJECT_VERSION="$BUILD_NUMBER" MARKETING_VERSION="1.$BUILD_NUMBER")
+# The account Worker's address (never committed): HABLA_BRIDGE_URL, else the one this Mac uses.
+if [[ -z "${HABLA_BRIDGE_URL:-}" ]]; then
+  BRIDGE_JSON="$HOME/Library/Application Support/Habla Studio/Security/bridge.json"
+  [[ -f "$BRIDGE_JSON" ]] && HABLA_BRIDGE_URL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("url",""))' "$BRIDGE_JSON" 2>/dev/null)
+fi
+VERSIONS=(CURRENT_PROJECT_VERSION="$BUILD_NUMBER" MARKETING_VERSION="1.$BUILD_NUMBER" HABLA_BRIDGE_URL="${HABLA_BRIDGE_URL:-}")
 DD="$ROOT/.build/DD-release"
 DIST="$ROOT/dist"
 mkdir -p "$DIST"

@@ -264,6 +264,13 @@ public extension BookManifest {
         return seen
     }
 
+    /// Stand-in for a book of the account that hasn't arrived yet (its title, for the shelf).
+    public static func offered(id: String, title: String, author: String) -> BookManifest {
+        BookManifest(id: id, title: title, author: author, language: "en", sourceFileName: "",
+                     koreaderDigest: "", accentColor: ImageTools.accentColor(from: nil, seed: id), createdAt: Date(), updatedAt: Date(),
+                     revision: 0, chapters: [], files: [])
+    }
+
     /// Stand-in for a book whose files are gone (e.g. a restored reader window after deletion).
     static func missing(id: String) -> BookManifest {
         BookManifest(id: id, title: "This book was deleted", author: "", language: "en", sourceFileName: "",
