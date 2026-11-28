@@ -351,10 +351,10 @@ public final class StudioStore: ObservableObject {
             narratingOn = await bridge.narratingDevices()
             cloudPausedUntil = await bridge.pausedUntil
             // Deleted on another device: deleted here too.
-            for id in await bridge.booksDeletedElsewhere() { delete(id) }
+            for id in await bridge.booksDeletedElsewhere() { removeFromXteink(id); delete(id) }
             try await bridge.receiveEPUBs()
             let arrived = try await bridge.receiveBooks()
-            if !arrived.isEmpty { reload() }
+            if !arrived.isEmpty { reload(); kickXteink() }      // books from other devices go on to the Xteink
             // Books arrive text first and their audio follows. One being narrated on another
             // running device is left to it. One nobody narrates is taken by the best running
             // narrator: here if that's this Mac, or if nobody has taken it for half an hour.
@@ -757,7 +757,12 @@ public final class StudioStore: ObservableObject {
         pairingWindow.onChange = { [weak self] in Task { @MainActor in self?.refreshPairing() } }
         server.onJoin = { [weak self] config, name in Task { @MainActor in self?.adoptAccount(config, name: name) } }
         if !helperOnly { startServer() }                 // a helper doesn't share a library on Wi-Fi
-        if Features.xteink { startXteinkWatcher() }
+        // The Xteink reads the Mac's places and sends its own here; they go on to the account
+        // right away (it has no account of its own). A helper Mac keeps out of it.
+        server.onEReaderPosition = { [weak self] _ in
+            Task { @MainActor in self?.reload(); self?.kickBridge(after: 2) }
+        }
+        if Features.xteink && !helperOnly { startXteinkWatcher() }
         startLibraryWatcher()
         resumeUnfinished()
         upgradeAudioFormat()
@@ -911,8 +916,9 @@ public final class StudioStore: ObservableObject {
 
     /// `everywhere`: the user deleted it, so it goes from every device of the account too.
     public func delete(_ id: String, everywhere: Bool = false) {
-        if everywhere, guestBooks[id] == nil, let bridge {
-            Task { await bridge.recordDeleted(id); kickBridge() }
+        if everywhere, guestBooks[id] == nil {
+            removeFromXteink(id)
+            if let bridge { Task { await bridge.recordDeleted(id); kickBridge() } }
         }
         queue.removeAll { $0 == id }          // first, so the finishing render can't pick it up again
         deleting.insert(id)
@@ -1278,6 +1284,18 @@ public final class StudioStore: ObservableObject {
         server.opdsKey = LibraryServer.opdsKey(password: c.password)
     }
 
+    /// Books deleted from the account, still to take off the Xteink when it's next in reach.
+    var xteinkRemovals: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "habla.xteinkRemove") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: "habla.xteinkRemove") }
+    }
+
+    func removeFromXteink(_ id: String) {
+        guard Features.xteink, !helperOnly, books.contains(where: { $0.id == id }) else { return }
+        var r = xteinkRemovals; r.insert(id); xteinkRemovals = r
+        kickXteink()
+    }
+
     /// Ask the watcher to check right away (after an import, a finished narration, "Send now").
     public func kickXteink() { xteinkKick = true; lastPushSignature = nil; xteinkFailures = 0 }
 
@@ -1325,8 +1343,13 @@ public final class StudioStore: ObservableObject {
                 saveXteinkCredentials(creds)
             }
             let signature = books.map { "\($0.id)" }.sorted().joined(separator: ",") + "@\(device.host)"
-            if signature != lastPushSignature {
+            let removals = xteinkRemovals
+            if signature != lastPushSignature || !removals.isEmpty {
                 xteink = .working("Checking \(name)…")
+                if !removals.isEmpty {
+                    let removed = try await sync.removeBooks(removals)
+                    xteinkRemovals = xteinkRemovals.subtracting(removed)
+                }
                 let result = try await sync.pushBooks(from: library, only: Set(books.map(\.id))) { title in
                     Task { @MainActor in self.xteink = .working("Sending “\(title)”…") }
                 }

@@ -1,6 +1,6 @@
 /// Switches for features that exist in code but aren't shown yet.
 public enum Features {
-    /// Xteink / CrossPoint delivery and sync. Hidden until it's been tried on the real device;
-    /// the KOReader-sync and OPDS routes stay on the server (they're inert without a device).
-    public static let xteink = false
+    /// Xteink / CrossPoint delivery and sync, part of the account's sync loop on every
+    /// (non-helper) Mac: books go onto it, its places come back and go out to the account.
+    public static let xteink = true
 }

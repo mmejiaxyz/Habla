@@ -173,6 +173,30 @@ final class BridgeTests: XCTestCase {
     }
 
     /// A bad byte, a wrong key, or a full bridge never breaks a library.
+    /// The original EPUB travels to the account's other Macs (so each can hand it to the Xteink),
+    /// byte for byte, and never to a phone.
+    func testOriginalEPUBReachesMacsOnly() async throws {
+        let (macLib, m) = try await makeLibrary()
+        let original = BookImporter.originalURL(for: m.id, in: macLib)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        let libs = (0..<2).map { _ -> URL in
+            let l = Fixtures.tempDir().appendingPathComponent("Library")
+            try? FileManager.default.createDirectory(at: l, withIntermediateDirectories: true)
+            return l
+        }
+        let (mac, _, _) = device("mac-1", .mac, library: macLib)
+        let (mac2, _, _) = device("mac-2", .mac, library: libs[0])
+        let (phone, _, _) = device("iphone-1", .phone, library: libs[1])
+        for d in [mac, mac2, phone, mac] { try await d.syncState() }
+        let sent = try await mac.publishNewBooks()
+        XCTAssertEqual(sent, [m.id])
+        for d in [mac2, phone] { try await d.syncState(); let got = try await d.receiveBooks(); XCTAssertEqual(got, [m.id]) }
+        XCTAssertEqual(try Data(contentsOf: BookImporter.originalURL(for: m.id, in: libs[0])), try Data(contentsOf: original))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: BookImporter.originalURL(for: m.id, in: libs[1]).path))
+        let phoneBundle = BookBundle.url(for: m.id, in: libs[1])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: phoneBundle.appendingPathComponent("_original.epub").path))
+    }
+
     func testFailuresLeaveLibrariesAlone() async throws {
         let keys = BridgeKeys(libraryKey: key)
         let sealed = try keys.seal(Data("hello".utf8), logical: "a", padTo: 4096)

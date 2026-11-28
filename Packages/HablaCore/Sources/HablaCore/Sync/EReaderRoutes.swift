@@ -55,8 +55,10 @@ extension LibraryServer {
                let map = try? KOReaderPositionMap(bundle: bundle),
                let pos = map.position(for: pointer) {
                 let fraction = (body["percentage"] as? Double) ?? map.percentage(chapter: pos.chapter, sentence: pos.sentence)
-                progress.merge(ReadingPosition(bookID: try! bundle.manifest().id, chapter: pos.chapter, sentence: pos.sentence,
+                let id = try! bundle.manifest().id
+                progress.merge(ReadingPosition(bookID: id, chapter: pos.chapter, sentence: pos.sentence,
                                                mode: .reading, deviceID: "koreader:\(device)", fraction: fraction))
+                onEReaderPosition?(id)
             }
             // Unknown documents are acknowledged (the device's sync queue must not stall).
             return .object(["document": document, "timestamp": Int(Date().timeIntervalSince1970)])

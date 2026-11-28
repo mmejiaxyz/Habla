@@ -236,6 +236,22 @@ public struct XteinkSync {
         public var failed: [(title: String, reason: String)] = []
     }
 
+    /// Takes books deleted from the account off the device: only Habla's own copies in `/Habla`
+    /// (named "<title>-<id prefix>.epub"), never the user's other files. Returns the ids done.
+    public func removeBooks(_ ids: Set<String>) async throws -> Set<String> {
+        let dir = "/\(folder)"
+        let root = try await device.files(in: "/")
+        guard root.contains(where: { $0.isDirectory && $0.name == folder }) else { return ids }
+        let existing = try await device.files(in: dir)
+        var done = Set<String>()
+        for id in ids {
+            let suffix = "-\(id.prefix(8)).epub"
+            for f in existing where !f.isDirectory && f.name.hasSuffix(suffix) { try await device.delete("\(dir)/\(f.name)") }
+            done.insert(id)
+        }
+        return done
+    }
+
     /// Sends every book whose original EPUB the Mac kept and the device doesn't have yet
     /// into `/Habla`. Each upload is verified by size on the device; a mismatch (power
     /// loss, Wi-Fi drop) is retried once. Never deletes the user's other files.

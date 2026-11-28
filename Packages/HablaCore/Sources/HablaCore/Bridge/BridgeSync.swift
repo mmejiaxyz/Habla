@@ -606,7 +606,8 @@ public actor BridgeSync {
                       !(self.role == .phone && !m.isFullyRendered && previous != nil),
                       self.role == .helper || self.sender(of: m) == self.deviceID else { continue }
                 let transfer = Transfer(id: "\(m.id)-\(m.revision)", kind: .book, bookID: m.id, revision: m.revision, filename: nil, manifest: m,
-                                        files: m.files.map { TransferFile(path: $0.path, size: $0.size, sha256: $0.sha256, chunks: Self.chunks($0.size)) },
+                                        files: m.files.map { TransferFile(path: $0.path, size: $0.size, sha256: $0.sha256, chunks: Self.chunks($0.size)) }
+                                            + self.originalFile(m.id),
                                         createdAt: previous?.createdAt ?? Date(), byContent: true)
                 // Only what isn't on the bridge yet needs room.
                 if present == nil { present = Set(try await self.client.list(.transit).map(\.name)) }
@@ -620,7 +621,7 @@ public actor BridgeSync {
                 }
                 let bundle = BookBundle(url: BookBundle.url(for: m.id, in: self.library))
                 self.log("Sending “\(m.title)” to your other devices…")
-                try await self.upload(transfer, present: present!) { bundle.fileURL($0.path) }
+                try await self.upload(transfer, present: present!) { self.sourceURL($0, bundle: bundle, id: m.id) }
                 for f in transfer.files { for i in 0..<f.chunks { present!.insert(self.keys.objectName(transfer.logical(f, chunk: i))) } }
                 self.log("Sent “\(m.title)”.")
                 for old in self.saved.outbox where old.bookID == m.id { try await self.deleteChunks(old, sparing: [transfer]) }
@@ -654,7 +655,8 @@ public actor BridgeSync {
                     guard let m = t.manifest, m.id == t.bookID, !installed.contains(m.id), only?.contains(m.id) ?? true,
                           !self.isDeleted(m.id), !self.saved.declined.contains(m.id) else { continue }
                     if let mine = local[m.id] {
-                        guard ready(m) > ready(mine) || (ready(m) == ready(mine) && m.revision > mine.revision) else {
+                        guard ready(m) > ready(mine) || (ready(m) == ready(mine) && m.revision > mine.revision)
+                                || self.lacksOriginal(t, m.id) else {
                             if (self.saved.notNeeded[m.id] ?? -1) < m.revision { self.saved.notNeeded[m.id] = m.revision; self.save() }
                             continue
                         }
@@ -702,6 +704,7 @@ public actor BridgeSync {
         // Skip what's already here: unchanged files, and files a stopped earlier attempt finished
         // (written before the manifest, so the old manifest doesn't list them: check their bytes).
         let needed = t.files.filter { f in
+            if f.path == Self.originalPath { return lacksOriginal(t, m.id) }
             let url = bundle.fileURL(f.path)
             guard (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int) == f.size else { return true }
             if oldHashes[f.path] == f.sha256 { return false }
@@ -711,7 +714,7 @@ public actor BridgeSync {
         var done = 0
         onProgress?(m.id, 0)
         for f in needed {
-            let dest = bundle.fileURL(f.path)
+            let dest = f.path == Self.originalPath ? BookImporter.originalURL(for: m.id, in: library) : bundle.fileURL(f.path)
             let before = done
             let temp = try await download(t, f) { [onProgress, onActivity] bytes in
                 let fraction = Double(before + bytes) / Double(total)
@@ -865,6 +868,28 @@ public actor BridgeSync {
     }
 
     // MARK: - Helpers
+
+    /// A book's original EPUB travels with it (outside the bundle) so every Mac can hand it to
+    /// an e-reader: the Xteink matches positions by that exact file's digest. Phones skip it.
+    static let originalPath = "_original.epub"
+
+    func originalFile(_ id: String) -> [TransferFile] {
+        guard role != .phone else { return [] }
+        let url = BookImporter.originalURL(for: id, in: library)
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
+              let hash = try? BookBundle.sha256(of: url) else { return [] }
+        return [TransferFile(path: Self.originalPath, size: size, sha256: hash, chunks: Self.chunks(size))]
+    }
+
+    func sourceURL(_ f: TransferFile, bundle: BookBundle, id: String) -> URL {
+        f.path == Self.originalPath ? BookImporter.originalURL(for: id, in: library) : bundle.fileURL(f.path)
+    }
+
+    /// A Mac whose copy of this book has no original EPUB, offered one by `t`.
+    func lacksOriginal(_ t: Transfer, _ id: String) -> Bool {
+        guard role == .mac, t.files.contains(where: { $0.path == Self.originalPath }) else { return false }
+        return !FileManager.default.fileExists(atPath: BookImporter.originalURL(for: id, in: library).path)
+    }
 
     static func chunks(_ size: Int) -> Int { max(1, (size + BridgeKeys.chunkSize - 1) / BridgeKeys.chunkSize) }
 

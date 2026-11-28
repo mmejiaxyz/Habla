@@ -475,6 +475,22 @@ final class XteinkTests: XCTestCase {
         XCTAssertEqual(fake.settings["koServerUrl"] as? String, "http://10.0.0.44:8787")
     }
 
+    /// A book deleted from the account leaves the device, but only Habla's own copy.
+    func testRemoveTakesOnlyHablasCopy() async throws {
+        let fake = FakeCrossPoint()
+        let ports = try await fake.start()
+        defer { fake.stop() }
+        let sync = XteinkSync(device: CrossPointDevice(name: "X4", host: "127.0.0.1", port: Int(ports.http)))
+        let lib = Fixtures.tempDir()
+        let m = try BookImporter().importEPUB(at: Fixtures.writeSampleEPUB(to: lib), into: lib).manifest()
+        _ = try await sync.pushBooks(from: lib)
+        fake.files["/Habla/My own notes.epub"] = Data("mine".utf8)
+        fake.files["/Other-\(m.id.prefix(8)).epub"] = Data("outside".utf8)
+        let done = try await sync.removeBooks([m.id])
+        XCTAssertEqual(done, [m.id])
+        XCTAssertEqual(Set(fake.files.keys), ["/Habla/My own notes.epub", "/Other-\(m.id.prefix(8)).epub"])
+    }
+
     func testAppUpdateParsesGitHubRelease() {
         let json = """
         {"tag_name":"build-12","name":"Habla 1.12","body":"Fix reader","draft":false,"prerelease":false,

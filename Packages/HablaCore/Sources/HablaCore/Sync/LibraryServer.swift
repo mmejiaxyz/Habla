@@ -33,6 +33,8 @@ public final class LibraryServer: @unchecked Sendable {
     public var tlsFingerprint: String?
     /// KOReader / OPDS routes for e-readers (plain HTTP devices). Off unless the Xteink feature is on.
     public var allowEReaders = false
+    /// An e-reader sent a reading position (book id): the Mac passes it on to the account.
+    public var onEReaderPosition: (@Sendable (String) -> Void)?
     /// A paired device made a request.
     public var onDevice: (@Sendable (PairedDevice) -> Void)?
     /// Bookmarks and underlines, exchanged with paired devices.

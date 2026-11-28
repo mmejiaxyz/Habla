@@ -57,3 +57,14 @@ Flow (`XteinkSync`, `habla xteink find|setup|send`):
    and add the `Habla (Mac)` OPDS catalog once.
 3. `pushBooks`: create `/Habla`, upload originals the device lacks, replace truncated copies, never delete.
 Tested against `Tests/HablaCoreTests/FakeCrossPoint.swift`, a protocol double built from the firmware source.
+
+## In the account's sync loop (2026-11-28)
+The Xteink has no account of its own: whichever (non-helper) Mac sees it in File Transfer mode sets it up
+and becomes its relay.
+- **Books in**: every book of the account goes onto it, including books added on the iPhone or on the other
+  Mac. A book's original EPUB now travels with it through the cloud to the account's other Macs (not to
+  phones), path `_original.epub` in the transfer, stored in `Originals/`.
+- **Places out**: a position the device sends (on sleep) is merged on the Mac and pushed to the cloud
+  straight away, so the iPhone and other Mac pick it up; the device reads back the newest place on its next sync.
+- **Deletes**: a book deleted from the account is removed from `/Habla` next time the device is in reach
+  (only files named `…-<id prefix>.epub` in `/Habla`; nothing else on the card is touched).

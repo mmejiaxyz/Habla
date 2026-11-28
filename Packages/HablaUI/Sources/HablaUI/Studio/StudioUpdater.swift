@@ -33,7 +33,8 @@ public final class StudioUpdater: ObservableObject {
     /// Developer builds run from Xcode / SwiftPM never replace themselves.
     var isDevelopmentBuild: Bool {
         let p = Bundle.main.bundlePath
-        return p.contains("/DerivedData/") || p.contains("/.build/") || !p.hasSuffix(".app")
+        // A local build (build 0, from Scripts/build.sh) must not be replaced by the last release.
+        return p.contains("/DerivedData/") || p.contains("/.build/") || !p.hasSuffix(".app") || installedBuild == 0
     }
 
     public func start() {
