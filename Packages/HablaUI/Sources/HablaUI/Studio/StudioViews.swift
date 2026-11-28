@@ -521,6 +521,7 @@ struct LinkMacSheet: View {
     @State private var newName = ""
     @State private var serverKey = ""
     @State private var server = ""
+    @State private var confirmLeave = false
 
     var body: some View {
         ScrollView {
@@ -564,7 +565,13 @@ struct LinkMacSheet: View {
                 note("Shows a one-time code for your iPhone or another Mac.")
                 Button("Show a code") { Task { await store.showJoinCode() } }
             }
+            Divider()
+            Button("Log out of this account…") { confirmLeave = true }
+            note("Your books stay on this Mac. To come back, use a code from one of your devices.")
         }
+        .confirmationDialog("Log out of “\(store.accountName ?? "this account")”?", isPresented: $confirmLeave) {
+            Button("Log Out", role: .destructive) { Task { await store.leaveAccount() } }
+        } message: { Text("This Mac stops syncing with your other devices. Its books stay here.") }
     }
 
     var joinOrCreate: some View {

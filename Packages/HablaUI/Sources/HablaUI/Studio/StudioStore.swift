@@ -262,6 +262,21 @@ public final class StudioStore: ObservableObject {
 
     public func hideJoinCode() { shownCode = nil }
 
+    /// Logs this Mac out: the account forgets it, the account key leaves this Mac, nothing
+    /// syncs through the cloud any more. Its books stay (and still play and read).
+    public func leaveAccount() async {
+        if let bridge { try? await bridge.leave() }
+        bridgeLoop?.cancel(); listener?.stop(); listener = nil; bridge = nil
+        bridgeKick?.cancel(); bridgeKick = nil
+        try? FileManager.default.removeItem(at: bridgeFileURL)
+        try? FileManager.default.removeItem(at: accountStateURL)
+        accountName = nil; UserDefaults.standard.removeObject(forKey: "habla.accountName")
+        accountDevices = []; narratingOn = [:]; shownCode = nil
+        bridgeSynced = nil; assignedHere = []
+        setServerAccount(nil)
+        objectWillChange.send()
+    }
+
     /// Removes a device from the account (e.g. this Mac before a clean install).
     public func forgetDevice(_ d: AccountDevice) {
         guard let bridge else { return }

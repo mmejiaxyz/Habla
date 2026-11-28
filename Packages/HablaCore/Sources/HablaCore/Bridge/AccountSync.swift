@@ -237,6 +237,9 @@ public actor AccountSync {
     /// Download tapped for a book whose audio isn't in the cloud any more: a holder sends it again.
     public func request(_ id: String) { saved.requested.insert(id); saved.declined.remove(id); save() }
 
+    /// Logging out: the account forgets this device (its books stay on it).
+    public func leave() async throws { try await removeDevice(serverID) }
+
     public func removeDevice(_ id: String) async throws {
         try await client.removeDevice(id)
         saved.devices.removeAll { $0.id == id }
