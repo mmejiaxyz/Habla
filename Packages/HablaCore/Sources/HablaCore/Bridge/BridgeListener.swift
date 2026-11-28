@@ -1,8 +1,8 @@
 import Foundation
 import Network
 
-/// Keeps one live connection to the bridge (`GET /v1/listen`, a hibernating WebSocket: idle costs
-/// nothing) and calls `onChange` the moment another device updates its document. While it is
+/// Keeps one live connection to the account (`GET /v2/listen`, a hibernating WebSocket: idle costs
+/// nothing) and calls `onChange` the moment something changes for this device. While it is
 /// connected, this device counts as running for the others. Reconnects after sleep, network
 /// changes and errors (backing off up to 5 minutes); pings are protocol pings, which are free.
 public final class BridgeListener: NSObject, @unchecked Sendable, URLSessionWebSocketDelegate {
@@ -19,11 +19,11 @@ public final class BridgeListener: NSObject, @unchecked Sendable, URLSessionWebS
 
     public init(config: BridgeConfig, deviceID: String, onChange: @escaping @Sendable () -> Void) {
         let keys = BridgeKeys(libraryKey: config.libraryKey)
-        var c = URLComponents(url: config.url.appendingPathComponent("v1/listen"), resolvingAgainstBaseURL: false)!
+        var c = URLComponents(url: config.url.appendingPathComponent("v2/listen"), resolvingAgainstBaseURL: false)!
         c.scheme = c.scheme == "http" ? "ws" : "wss"
         var r = URLRequest(url: c.url!)
         r.setValue("Bearer \(keys.token)", forHTTPHeaderField: "Authorization")
-        r.setValue(keys.objectName("state/\(deviceID)"), forHTTPHeaderField: "X-Habla-Device")
+        r.setValue(keys.objectName("device/\(deviceID)"), forHTTPHeaderField: "X-Habla-Device")
         request = r
         self.onChange = onChange
     }

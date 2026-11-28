@@ -12,7 +12,7 @@ public enum BridgeError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .capReached(let c): return "The cloud bridge reached its free limit (\(c)); syncing at home only for now."
-        case .unauthorized: return "The cloud bridge doesn't recognise this library."
+        case .unauthorized: return "The cloud doesn't recognise this account."
         case .http(let code): return "The cloud bridge answered \(code)."
         case .network(let m): return "Can't reach the cloud bridge: \(m)"
         case .corrupt: return "Something from the cloud bridge didn't decrypt."
@@ -20,70 +20,13 @@ public enum BridgeError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-/// Where the bridge is and the key that makes it blind. Lives on the Mac (`Security/bridge.json`)
-/// and on paired phones (Keychain); never leaves them except over the pinned LAN link.
+/// Where the account's Worker is and the key that makes it blind. Lives on the Mac
+/// (`Security/bridge.json`) and on the iPhone (Keychain); reaches a new device only sealed by a
+/// one-time code.
 public struct BridgeConfig: Codable, Equatable, Sendable {
     public var url: URL
     public var libraryKey: Data
     public init(url: URL, libraryKey: Data) { self.url = url; self.libraryKey = libraryKey }
-}
-
-/// An account: one library on every device. Its QR code (and the same text to paste on a Mac)
-/// is a `habla://account` link holding the bridge URL, the library key and the name. Whoever
-/// has it is one of your devices: it works like a password.
-public enum AccountCode {
-    public static func url(_ c: BridgeConfig, name: String?) -> URL {
-        var u = URLComponents()
-        u.scheme = "habla"; u.host = "account"
-        let key = c.libraryKey.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-        u.queryItems = [URLQueryItem(name: "u", value: c.url.absoluteString), URLQueryItem(name: "k", value: key)]
-            + ((name?.isEmpty == false) ? [URLQueryItem(name: "n", value: name)] : [])
-        return u.url!
-    }
-
-    /// Reads an account link, or an older `habla-link:` code.
-    public static func parse(_ text: String) -> (config: BridgeConfig, name: String?)? {
-        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let c = BridgeCode.parseLink(raw) { return (c, nil) }
-        guard let comps = URLComponents(string: raw), comps.scheme == "habla", comps.host == "account",
-              let items = comps.queryItems else { return nil }
-        func v(_ k: String) -> String? { items.first { $0.name == k }?.value }
-        guard let u = v("u").flatMap(URL.init(string:)), u.scheme == "https", var k = v("k") else { return nil }
-        k = k.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        while k.count % 4 != 0 { k += "=" }
-        guard let key = Data(base64Encoded: k), key.count == 32 else { return nil }
-        return (BridgeConfig(url: u, libraryKey: key), v("n").map { String($0.prefix(60)) })
-    }
-}
-
-/// The codes people paste between Macs. A link code joins a library (it holds the key: a
-/// password). An invite code lets someone else's Mac start its own library on the same bridge.
-public enum BridgeCode {
-    public struct Invite: Codable, Equatable, Sendable {
-        public var url: URL; public var invite: String
-        public init(url: URL, invite: String) { self.url = url; self.invite = invite }
-    }
-
-    public static func link(_ c: BridgeConfig) -> String? {
-        (try? JSONEncoder().encode(c)).map { "habla-link:" + $0.base64EncodedString() }
-    }
-    public static func parseLink(_ code: String) -> BridgeConfig? {
-        guard let c: BridgeConfig = decode(code, prefix: "habla-link:"), c.libraryKey.count == 32, c.url.scheme == "https" else { return nil }
-        return c
-    }
-    public static func invite(_ i: Invite) -> String? {
-        (try? JSONEncoder().encode(i)).map { "habla-invite:" + $0.base64EncodedString() }
-    }
-    public static func parseInvite(_ code: String) -> Invite? {
-        guard let i: Invite = decode(code, prefix: "habla-invite:"), i.url.scheme == "https", !i.invite.isEmpty else { return nil }
-        return i
-    }
-    static func decode<T: Decodable>(_ code: String, prefix: String) -> T? {
-        let raw = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard raw.hasPrefix(prefix), let d = Data(base64Encoded: String(raw.dropFirst(prefix.count))) else { return nil }
-        return try? JSONDecoder().decode(T.self, from: d)
-    }
 }
 
 /// One object as the Worker lists it.
@@ -118,31 +61,51 @@ public struct BridgeClient: Sendable {
         self.baseURL = baseURL; self.token = token; self.device = device; self.session = session
     }
 
-    /// Registers this library's token hash (Mac, once). Needs the Worker's enrollment secret.
-    public func enroll(tokenHash: String, secret: String) async throws {
-        var r = request("v1/spaces", method: "POST", auth: false)
-        r.setValue(secret, forHTTPHeaderField: "X-Habla-Enroll")
+    // MARK: v2: the account (Docs/cloud-bridge.md)
+
+    /// Creates an account (needs the Worker's server key). Fine if it already exists.
+    public func createAccount(tokenHash: String, serverKey: String) async throws {
+        var r = request("v2/accounts", method: "POST", auth: false)
+        r.setValue(serverKey, forHTTPHeaderField: "X-Habla-Enroll")
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.httpBody = try JSONEncoder().encode(["tokenHash": tokenHash])
         _ = try await perform(r)
     }
 
-    /// Registers someone else's library with a one-time invite from an enrolled one.
-    public func enroll(tokenHash: String, invite: String) async throws {
-        var r = request("v1/spaces", method: "POST", auth: false)
-        r.setValue(invite, forHTTPHeaderField: "X-Habla-Invite")
+    /// Leaves a one-time code's sealed payload with the account (15 minutes, works once).
+    public func offer(_ code: JoinCode, payload: JoinCode.Payload) async throws {
+        let d = code.derive()
+        var r = request("v2/codes", method: "POST")
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        r.httpBody = try JSONEncoder().encode(["tokenHash": tokenHash])
+        r.httpBody = try JSONEncoder().encode(["id": d.id, "wrapped": try code.seal(payload, with: d)])
         _ = try await perform(r)
     }
 
-    /// A one-time invite (7 days) that lets someone else's Mac start its own library here.
-    public func createInvite() async throws -> String {
-        let (data, _) = try await perform(request("v1/invites", method: "POST"))
-        guard let invite = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["invite"] as? String else {
-            throw BridgeError.http(500)
-        }
-        return invite
+    /// Redeems a one-time code: the account's key and name. `BridgeError.http(404)`: used, expired or mistyped.
+    public static func join(_ code: JoinCode, at baseURL: URL, session: URLSession = .shared) async throws -> JoinCode.Payload {
+        let d = code.derive()
+        let c = BridgeClient(baseURL: baseURL, token: "", session: session)
+        var r = c.request("v2/join", method: "POST", auth: false)
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONEncoder().encode(["id": d.id])
+        let (data, _) = try await c.perform(r)
+        guard let wrapped = (try? JSONDecoder().decode([String: String].self, from: data))?["wrapped"] else { throw BridgeError.corrupt }
+        return try code.open(wrapped, with: d)
+    }
+
+    /// One round with the account: this device's report in, the account's view and tasks out.
+    func sync(_ body: Data) async throws -> Data {
+        var r = request("v2/sync", method: "POST")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = body
+        return try await perform(r).0
+    }
+
+    func removeDevice(_ id: String) async throws {
+        var r = request("v2/devices/remove", method: "POST")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONEncoder().encode(["id": id])
+        _ = try await perform(r)
     }
 
     public func usage() async throws -> BridgeUsage {

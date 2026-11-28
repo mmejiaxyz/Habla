@@ -1,9 +1,11 @@
-// Habla cloud bridge (Docs/cloud-bridge.md): an encrypted mailbox for one person's devices.
-// Everything stored here was sealed on a device; this Worker only checks a token hash,
-// keeps the account inside Cloudflare's free tier, and moves bytes.
+// Habla cloud (Docs/cloud-bridge.md). One `Account` Durable Object per account decides what
+// every device does; R2 carries sealed chunks in transit. Everything stored here was sealed on
+// a device: this Worker checks token hashes, keeps the account inside Cloudflare's free tier,
+// and moves bytes.
 
 const NAME = /^[0-9a-f]{40}$/;
-const INVITE_DAYS = 7;
+const CODE_ID = /^[0-9a-f]{64}$/;
+const CODE_MINUTES = 15;
 const enc = new TextEncoder();
 
 const json = (body, status = 200, headers = {}) =>
@@ -162,29 +164,36 @@ const dailyCap = (env) => take(env, day(), 'requests', num(env, 'REQUESTS_CAP_DA
 async function handle(request, env) {
   const url = new URL(request.url);
   const parts = url.pathname.split('/').filter(Boolean);                   // ["v1", "state", name?]
-  if (parts[0] !== 'v1') return fail(404, 'not found');
+  if (parts[0] !== 'v1' && parts[0] !== 'v2') return fail(404, 'not found');
 
-  if (parts[1] === 'spaces' && parts.length === 2 && request.method === 'POST') {
-    const invite = request.headers.get('x-habla-invite');
-    if (invite == null) {
-      if (!env.ENROLL_SECRET) return fail(503, 'enrollment not configured');
-      if (!sameSecret(request.headers.get('x-habla-enroll') ?? '', env.ENROLL_SECRET)) return fail(403, 'forbidden');
-    }
+  // Creating an account needs the server key (only the owner has it). The account id is the
+  // token's hash, so a v1 space is already a v2 account.
+  if (((parts[0] === 'v1' && parts[1] === 'spaces') || (parts[0] === 'v2' && parts[1] === 'accounts'))
+      && parts.length === 2 && request.method === 'POST') {
+    if (!env.ENROLL_SECRET) return fail(503, 'enrollment not configured');
+    if (!sameSecret(request.headers.get('x-habla-enroll') ?? '', env.ENROLL_SECRET)) return fail(403, 'forbidden');
     if (!(await dailyCap(env))) return fail(429, 'daily request cap reached', 'requests');
     let body;
     try { body = await request.json(); } catch { return fail(400, 'bad json'); }
     if (!/^[0-9a-f]{64}$/.test(body?.tokenHash ?? '')) return fail(400, 'bad token hash');
-    if (invite != null) {
-      // Someone else's library, invited by an enrolled one: the invite works once, and the
-      // number of libraries is capped (they all share the account's free tier).
-      const spaces = await env.DB.prepare('SELECT COUNT(*) AS n FROM spaces').first();
-      if ((spaces?.n ?? 0) >= num(env, 'MAX_SPACES')) return fail(403, 'no room for another library', 'spaces');
-      const used = await env.DB.prepare('DELETE FROM invites WHERE hash = ?1 AND expires > ?2 RETURNING space')
-        .bind(await sha256hex(invite), Date.now()).first();
-      if (!used) return fail(403, 'invite used or expired');
-    }
+    const spaces = await env.DB.prepare('SELECT COUNT(*) AS n FROM spaces').first();
+    const known = await env.DB.prepare('SELECT 1 AS ok FROM spaces WHERE id = ?1').bind(body.tokenHash).first();
+    if (!known && (spaces?.n ?? 0) >= num(env, 'MAX_SPACES')) return fail(403, 'no room for another account', 'spaces');
     const r = await env.DB.prepare('INSERT OR IGNORE INTO spaces (id, created) VALUES (?1, ?2)').bind(body.tokenHash, Date.now()).run();
     return json({ ok: true }, r.meta?.changes ? 201 : 200);
+  }
+
+  // Joining with a one-time code: no token yet. The code's id is a PBKDF2/HKDF derivative of
+  // the code (256 bits: unguessable); the answer is sealed with a key only the code makes.
+  if (parts[0] === 'v2' && parts[1] === 'join' && parts.length === 2 && request.method === 'POST') {
+    let body;
+    try { body = await request.json(); } catch { return fail(400, 'bad json'); }
+    if (!CODE_ID.test(body?.id ?? '')) return fail(400, 'bad code');
+    if (!(await dailyCap(env))) return fail(429, 'daily request cap reached', 'requests');
+    const row = await env.DB.prepare('DELETE FROM codes WHERE id = ?1 AND expires > ?2 RETURNING wrapped')
+      .bind(body.id, Date.now()).first();
+    if (!row) return fail(404, 'code used, expired or wrong');
+    return json({ wrapped: row.wrapped });
   }
 
   const auth = request.headers.get('authorization') ?? '';
@@ -193,17 +202,8 @@ async function handle(request, env) {
   if (!(await env.DB.prepare('SELECT 1 AS ok FROM spaces WHERE id = ?1').bind(space).first())) return fail(401, 'unauthorized');
   if (!(await dailyCap(env))) return fail(429, 'daily request cap reached', 'requests');
 
+  if (parts[0] === 'v2') return v2(request, env, space, parts);
   if (parts[1] === 'usage' && parts.length === 2 && request.method === 'GET') return json(await usage(env));
-  if (parts[1] === 'invites' && parts.length === 2 && request.method === 'POST') {
-    const now = Date.now();
-    const open = await env.DB.prepare('SELECT COUNT(*) AS n FROM invites WHERE space = ?1 AND expires > ?2').bind(space, now).first();
-    if ((open?.n ?? 0) >= 3) return fail(429, 'too many open invites', 'invites');
-    const invite = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
-      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const expires = now + INVITE_DAYS * 86400000;
-    await env.DB.prepare('INSERT INTO invites (hash, space, expires) VALUES (?1, ?2, ?3)').bind(await sha256hex(invite), space, expires).run();
-    return json({ invite, expires }, 201);
-  }
   if (parts[1] === 'listen' && parts.length === 2) {
     const device = request.headers.get('x-habla-device') ?? '';
     if (!NAME.test(device)) return fail(400, 'bad device');
@@ -250,7 +250,7 @@ async function scheduled(env) {
     .bind(cutoff).all()).results;
   for (const o of expired) await remove(env, o.space, o.kind, o.name);
 
-  await env.DB.prepare('DELETE FROM invites WHERE expires <= ?1').bind(Date.now()).run();
+  await env.DB.prepare('DELETE FROM codes WHERE expires <= ?1').bind(Date.now()).run();
 
   const stored = await listAll(env, env.BRIDGE);
   if (stored) {
@@ -295,6 +295,356 @@ export class Room {
   }
 
   async webSocketMessage() {}                          // devices only listen
+  async webSocketClose(ws, code) { try { ws.close(code === 1005 ? 1000 : code, 'bye'); } catch {} }
+  async webSocketError() {}
+}
+
+// ---------------------------------------------------------------------------------------
+// v2: the account
+
+const DEVICE = /^[0-9a-f]{40}$/;
+const account = (env, space) => env.ACCOUNT?.get(env.ACCOUNT.idFromName(space));
+
+async function v2(request, env, space, parts) {
+  const device = request.headers.get('x-habla-device') ?? '';
+  if (parts[1] === 'codes' && parts.length === 2 && request.method === 'POST') {
+    let body;
+    try { body = await request.json(); } catch { return fail(400, 'bad json'); }
+    if (!CODE_ID.test(body?.id ?? '') || typeof body.wrapped !== 'string' || body.wrapped.length > 4096) return fail(400, 'bad code');
+    const now = Date.now();
+    const open = await env.DB.prepare('SELECT COUNT(*) AS n FROM codes WHERE space = ?1 AND expires > ?2').bind(space, now).first();
+    if ((open?.n ?? 0) >= 3) return fail(429, 'too many open codes', 'codes');
+    const expires = now + CODE_MINUTES * 60000;
+    await env.DB.prepare('INSERT OR REPLACE INTO codes (id, space, wrapped, expires) VALUES (?1, ?2, ?3, ?4)')
+      .bind(body.id, space, body.wrapped, expires).run();
+    return json({ expires }, 201);
+  }
+  if (!DEVICE.test(device)) return fail(400, 'bad device');
+  const a = account(env, space);
+  if (!a) return fail(503, 'no account object');
+  const forward = (path, init) => a.fetch(new Request(`https://account${path}`, init), {});
+  const headers = { 'x-habla-space': space, 'x-habla-device': device };
+  if (parts[1] === 'listen' && parts.length === 2) {
+    if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return fail(426, 'websocket required');
+    return a.fetch(new Request(`https://account/listen?space=${space}&d=${device}`, request));
+  }
+  if (request.method !== 'POST') return fail(405, 'method not allowed');
+  const body = await request.text();
+  if (body.length > (num(env, 'MAX_SYNC_BYTES') || 2 * 1048576)) return fail(413, 'too large');   // places ≤ 1 MiB + the book list
+  if (parts[1] === 'sync' && parts.length === 2) return forward('/sync', { method: 'POST', headers, body });
+  if (parts[1] === 'devices' && parts[2] === 'remove' && parts.length === 3) return forward('/remove', { method: 'POST', headers, body });
+  return fail(404, 'not found');
+}
+
+const MIN = 60000, DAY = 86400000;
+const ONLINE_MS = 2 * MIN;              // a sync this recent counts as online
+const NARRATOR_GRACE_MS = 15 * MIN;     // a narrator away this long loses its books
+const UPLOAD_GRACE_MS = 30 * MIN;       // an upload asked for and not done is asked of another
+const AUDIO_PACE_MS = 10 * MIN;         // a narrating device sends new chapters at most this often
+const EXPECTED_MS = 30 * DAY;           // devices seen this recently get every book
+const MAX_AUDIO_BOOKS = 3, MAX_EPUBS = 20;
+
+// One account: devices, books, who holds what, who narrates, what is in transit, and each
+// device's sealed places. SQLite-backed; hibernating sockets for the "changed" nudge.
+export class Account {
+  constructor(ctx, env) {
+    this.ctx = ctx; this.env = env; this.sql = ctx.storage.sql;
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, kind TEXT, info TEXT, narrator TEXT,
+      last_seen INTEGER, joined INTEGER)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS books (key TEXT PRIMARY KEY, meta TEXT, sentences INTEGER DEFAULT 0,
+      narratable INTEGER DEFAULT 0, added_at INTEGER DEFAULT 0, deleted_at INTEGER, narrator TEXT, narrator_at INTEGER,
+      epub_pack TEXT, epub_names TEXT, epub_at INTEGER, epub_by TEXT, epub_asked INTEGER,
+      audio_pack TEXT, audio_names TEXT, audio_ready INTEGER DEFAULT 0, audio_at INTEGER, audio_first INTEGER,
+      audio_by TEXT, audio_asked INTEGER, audio_dropped INTEGER DEFAULT 0)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS holdings (key TEXT, device TEXT, epub INTEGER, ready INTEGER, left_ INTEGER,
+      PRIMARY KEY (key, device))`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS declined (key TEXT, device TEXT, PRIMARY KEY (key, device))`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS requests (key TEXT, device TEXT, PRIMARY KEY (key, device))`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS places (device TEXT PRIMARY KEY, version INTEGER, data TEXT)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS settings (field TEXT PRIMARY KEY, data TEXT, at INTEGER)`);
+  }
+
+  rows(q, ...args) { return this.sql.exec(q, ...args).toArray(); }
+  row(q, ...args) { return this.rows(q, ...args)[0] ?? null; }
+  run(q, ...args) { this.sql.exec(q, ...args); }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const space = request.headers.get('x-habla-space') ?? url.searchParams.get('space');
+    if (space && /^[0-9a-f]{64}$/.test(space)) this.run(`INSERT OR REPLACE INTO meta (k, v) VALUES ('space', ?)`, space);
+    const device = request.headers.get('x-habla-device') ?? url.searchParams.get('d');
+    if (url.pathname === '/listen') {
+      for (const old of this.ctx.getWebSockets(device)) { try { old.close(4000, 'replaced'); } catch {} }
+      const [client, server] = Object.values(new WebSocketPair());
+      this.ctx.acceptWebSocket(server, [device]);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+    let body;
+    try { body = JSON.parse(await request.text() || '{}'); } catch { return json({ error: 'bad json' }, 400); }
+    if (url.pathname === '/sync') return json(await this.sync(device, body));
+    if (url.pathname === '/remove') { await this.remove(String(body.id ?? '')); this.notify(device); return json({ ok: true }); }
+    return json({ error: 'not found' }, 404);
+  }
+
+  online(id, now) {
+    if (this.ctx.getWebSockets(id).length > 0) return true;
+    const d = this.row(`SELECT last_seen FROM devices WHERE id = ?`, id);
+    return !!d && now - d.last_seen < ONLINE_MS;
+  }
+
+  notify(from) {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (!this.ctx.getTags(ws).includes(from)) { try { ws.send('changed'); } catch {} }
+    }
+  }
+
+  // Deletes chunks from R2 and the storage ledger (the account counts them toward the caps).
+  async dropBlobs(names) {
+    const space = this.row(`SELECT v FROM meta WHERE k = 'space'`)?.v;
+    if (!space || !names?.length) return;
+    for (const n of names) {
+      if (!NAME.test(n)) continue;
+      await this.env.BRIDGE?.delete(`${space}/transit/${n}`);
+      await this.env.DB?.prepare(`DELETE FROM objects WHERE space = ?1 AND kind = 'transit' AND name = ?2`).bind(space, n).run();
+    }
+  }
+
+  async remove(id) {
+    if (!DEVICE.test(id)) return;
+    for (const t of ['holdings', 'declined', 'requests']) this.run(`DELETE FROM ${t} WHERE device = ?`, id);
+    this.run(`DELETE FROM places WHERE device = ?`, id);
+    this.run(`DELETE FROM devices WHERE id = ?`, id);
+    this.run(`UPDATE books SET narrator = NULL WHERE narrator = ?`, id);
+    for (const ws of this.ctx.getWebSockets(id)) { try { ws.close(4001, 'removed'); } catch {} }
+  }
+
+  async sync(id, r) {
+    const now = Date.now();
+    const str = (v, max = 65536) => (typeof v === 'string' && v.length <= max ? v : null);
+    const int = (v) => (Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+    const before = this.fingerprint();
+    const narrator = r.narrator && Number(r.narrator.sps) > 0
+      ? JSON.stringify({ sps: Number(r.narrator.sps), queued: int(r.narrator.queued) }) : null;
+    const kind = r.kind === 'phone' ? 'phone' : 'mac';
+    this.run(`INSERT INTO devices (id, kind, info, narrator, last_seen, joined) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, info = COALESCE(excluded.info, info),
+      narrator = excluded.narrator, last_seen = excluded.last_seen`, id, kind, str(r.info, 16384), narrator, now, now);
+
+    for (const a of Array.isArray(r.added) ? r.added : []) {
+      if (!NAME.test(a?.key ?? '')) continue;
+      const at = Math.min(int(a.at), now);
+      const b = this.row(`SELECT deleted_at, added_at FROM books WHERE key = ?`, a.key);
+      if (!b) {
+        this.run(`INSERT INTO books (key, meta, sentences, narratable, added_at) VALUES (?, ?, ?, ?, ?)`,
+          a.key, str(a.meta, 8192), int(a.sentences), a.narratable ? 1 : 0, at);
+      } else if (b.deleted_at != null && at > b.deleted_at) {          // added again after a delete
+        this.run(`UPDATE books SET deleted_at = NULL, meta = ?, sentences = ?, narratable = ?, added_at = ? WHERE key = ?`,
+          str(a.meta, 8192), int(a.sentences), a.narratable ? 1 : 0, at, a.key);
+      } else if (b.deleted_at == null) {
+        this.run(`UPDATE books SET meta = COALESCE(meta, ?) WHERE key = ?`, str(a.meta, 8192), a.key);
+      }
+    }
+    for (const d of Array.isArray(r.deleted) ? r.deleted : []) {
+      if (!NAME.test(d?.key ?? '')) continue;
+      const at = Math.min(int(d.at), now);
+      const b = this.row(`SELECT deleted_at, added_at FROM books WHERE key = ?`, d.key);
+      if (!b) this.run(`INSERT INTO books (key, added_at, deleted_at) VALUES (?, 0, ?)`, d.key, at);
+      else if (b.deleted_at == null && at >= b.added_at) this.run(`UPDATE books SET deleted_at = ? WHERE key = ?`, at, d.key);
+    }
+
+    // What this device holds now (the whole list each time).
+    this.run(`DELETE FROM holdings WHERE device = ?`, id);
+    for (const h of Array.isArray(r.books) ? r.books : []) {
+      if (!NAME.test(h?.key ?? '')) continue;
+      this.run(`INSERT OR REPLACE INTO holdings (key, device, epub, ready, left_) VALUES (?, ?, ?, ?, ?)`,
+        h.key, id, h.epub ? 1 : 0, int(h.ready), int(h.left));
+    }
+    if (Array.isArray(r.declined)) {
+      this.run(`DELETE FROM declined WHERE device = ?`, id);
+      for (const k of r.declined) if (NAME.test(k)) this.run(`INSERT OR IGNORE INTO declined (key, device) VALUES (?, ?)`, k, id);
+    }
+    for (const k of Array.isArray(r.requested) ? r.requested : []) {
+      if (!NAME.test(k)) continue;
+      this.run(`INSERT OR IGNORE INTO requests (key, device) VALUES (?, ?)`, k, id);
+      this.run(`UPDATE books SET audio_dropped = 0 WHERE key = ?`, k);
+    }
+    for (const u of Array.isArray(r.uploaded) ? r.uploaded : []) {
+      const b = NAME.test(u?.key ?? '') && this.row(`SELECT * FROM books WHERE key = ? AND deleted_at IS NULL`, u.key);
+      const names = Array.isArray(u?.names) ? u.names.filter((n) => NAME.test(n)) : [];
+      if (!b || !str(u.pack)) { await this.dropBlobs(names); continue; }
+      const keep = new Set(names);
+      if (u.kind === 'epub') {
+        await this.dropBlobs(JSON.parse(b.epub_names ?? '[]').filter((n) => !keep.has(n)));
+        this.run(`UPDATE books SET epub_pack = ?, epub_names = ?, epub_at = ?, epub_by = NULL, epub_asked = NULL WHERE key = ?`,
+          u.pack, JSON.stringify(names), now, u.key);
+      } else if (u.kind === 'audio') {
+        await this.dropBlobs(JSON.parse(b.audio_names ?? '[]').filter((n) => !keep.has(n)));
+        this.run(`UPDATE books SET audio_pack = ?, audio_names = ?, audio_ready = ?, audio_at = ?,
+          audio_first = COALESCE(audio_first, ?), audio_by = NULL, audio_asked = NULL, audio_dropped = 0 WHERE key = ?`,
+          u.pack, JSON.stringify(names), int(u.ready), now, now, u.key);
+        this.run(`DELETE FROM requests WHERE key = ?`, u.key);
+      }
+    }
+    if (str(r.places, 1048576)) {
+      const v = (this.row(`SELECT version FROM places WHERE device = ?`, id)?.version ?? 0) + 1;
+      this.run(`INSERT OR REPLACE INTO places (device, version, data) VALUES (?, ?, ?)`, id, v, r.places);
+    }
+    for (const field of ['voice', 'name']) {
+      const s = r.settings?.[field];
+      if (!s || !str(s.data, 8192)) continue;
+      const at = Math.min(int(s.at), now);
+      const cur = this.row(`SELECT at FROM settings WHERE field = ?`, field);
+      if (!cur || at > cur.at) this.run(`INSERT OR REPLACE INTO settings (field, data, at) VALUES (?, ?, ?)`, field, s.data, at);
+    }
+
+    await this.plan(now);
+    if (this.fingerprint() !== before) this.notify(id);
+    return this.view(id, r.seen ?? {}, now);
+  }
+
+  // A cheap summary of everything another device would care about (not last_seen).
+  fingerprint() {
+    const parts = [
+      this.rows(`SELECT key, deleted_at, narrator, epub_at, audio_at, audio_ready FROM books ORDER BY key`),
+      this.rows(`SELECT key, device, epub, ready, left_ FROM holdings ORDER BY key, device`),
+      this.rows(`SELECT device, version FROM places ORDER BY device`),
+      this.rows(`SELECT field, at FROM settings ORDER BY field`),
+      this.rows(`SELECT id, info FROM devices ORDER BY id`),
+    ];
+    return JSON.stringify(parts);
+  }
+
+  // The account's decisions: who narrates each book, what goes up, what comes down.
+  async plan(now) {
+    const devices = this.rows(`SELECT * FROM devices`);
+    const byId = Object.fromEntries(devices.map((d) => [d.id, d]));
+    const online = new Set(devices.filter((d) => this.online(d.id, now)).map((d) => d.id));
+    const expected = devices.filter((d) => now - d.last_seen < EXPECTED_MS).map((d) => d.id);
+    const queue = Object.fromEntries(devices.map((d) => [d.id, d.narrator ? JSON.parse(d.narrator) : null]));
+    const books = this.rows(`SELECT * FROM books`);
+
+    // Deleted books: nothing of them stays in transit; tombstones go after 30 days.
+    for (const b of books.filter((b) => b.deleted_at != null)) {
+      await this.dropBlobs([...JSON.parse(b.epub_names ?? '[]'), ...JSON.parse(b.audio_names ?? '[]')]);
+      this.run(`UPDATE books SET epub_pack = NULL, epub_names = NULL, audio_pack = NULL, audio_names = NULL, narrator = NULL WHERE key = ?`, b.key);
+      if (now - b.deleted_at > EXPECTED_MS) this.run(`DELETE FROM books WHERE key = ?`, b.key);
+    }
+    const live = books.filter((b) => b.deleted_at == null).sort((a, b) => a.added_at - b.added_at);
+    const holdings = this.rows(`SELECT * FROM holdings`);
+    const declined = this.rows(`SELECT * FROM declined`);
+    const requests = this.rows(`SELECT * FROM requests`);
+    const macsOnline = [...online].filter((id) => byId[id]?.kind === 'mac' && queue[id]);
+
+    for (const b of live) {
+      const held = holdings.filter((h) => h.key === b.key);
+      const holder = (id) => held.find((h) => h.device === id);
+      const need = expected.filter((id) => !declined.some((x) => x.key === b.key && x.device === id));
+      const best = held.reduce((m, h) => Math.max(m, h.ready), 0);
+      // `left` is sentences still to narrate on that device; a copy with none left is done.
+      const done = held.some((h) => h.left_ === 0 && h.ready > 0);
+      const set = (q, ...a) => this.run(`UPDATE books SET ${q} WHERE key = ?`, ...a, b.key);
+
+      // Narration.
+      if (!b.narratable || done) {
+        if (b.narrator) set(`narrator = NULL, narrator_at = NULL`);
+      } else {
+        const cur = b.narrator && byId[b.narrator];
+        const away = cur && !online.has(cur.id) && now - cur.last_seen > NARRATOR_GRACE_MS;
+        const phoneWhileMac = cur && cur.kind === 'phone' && macsOnline.length > 0;
+        if (!cur || away || phoneWhileMac || !queue[cur.id]) {
+          const pool = macsOnline.length ? macsOnline : [...online].filter((id) => queue[id]);
+          let pick = null, finish = Infinity;
+          for (const id of pool) {
+            const q = queue[id];
+            const left = holder(id)?.left_ || b.sentences;
+            const t = (q.queued + left) / Math.max(0.01, q.sps);
+            if (t < finish) { finish = t; pick = id; }
+          }
+          if (pick) {
+            queue[pick] = { ...queue[pick], queued: queue[pick].queued + b.sentences };
+            set(`narrator = ?, narrator_at = ?`, pick, now);
+          } else if (cur && away) set(`narrator = NULL, narrator_at = NULL`);
+        }
+      }
+
+      // The EPUB: up while anyone lacks it, gone once everyone has it.
+      const lackEpub = need.filter((id) => !holder(id)?.epub);
+      if (b.epub_pack && lackEpub.length === 0) {
+        await this.dropBlobs(JSON.parse(b.epub_names ?? '[]'));
+        set(`epub_pack = NULL, epub_names = NULL, epub_at = NULL`);
+      } else if (!b.epub_pack && lackEpub.length > 0) {
+        const holders = held.filter((h) => h.epub).map((h) => h.device);
+        const inFlight = live.filter((x) => x.epub_pack).length;
+        if (holders.length && inFlight < MAX_EPUBS) this.ask(b, 'epub', holders, online, byId, now);
+      }
+
+      // The audio: up while anyone has less than the best copy.
+      const lackAudio = need.filter((id) => (holder(id)?.ready ?? 0) < best);
+      const coveredByPack = need.every((id) => (holder(id)?.ready ?? 0) >= (b.audio_pack ? b.audio_ready : best));
+      if (b.audio_pack && coveredByPack) {
+        await this.dropBlobs(JSON.parse(b.audio_names ?? '[]'));
+        set(`audio_pack = NULL, audio_names = NULL, audio_ready = 0, audio_at = NULL`);
+        b.audio_pack = null;
+      } else if (best > 0 && lackAudio.length > 0 && (!b.audio_pack || b.audio_ready < best)) {
+        const asked = requests.some((x) => x.key === b.key);
+        const bestHolders = held.filter((h) => h.ready === best).map((h) => h.device);
+        const stillNarrating = held.some((h) => h.ready === best && h.left_ > 0);
+        const paced = b.audio_pack && stillNarrating && now - (b.audio_at ?? 0) < AUDIO_PACE_MS;
+        if ((!b.audio_dropped || asked) && !paced) {
+          if (!b.audio_pack) {
+            const parked = live.filter((x) => x.audio_pack && x.key !== b.key).sort((x, y) => (x.audio_first ?? 0) - (y.audio_first ?? 0));
+            while (parked.length >= MAX_AUDIO_BOOKS) {           // only 3 books' audio wait in the cloud
+              const old = parked.shift();
+              await this.dropBlobs(JSON.parse(old.audio_names ?? '[]'));
+              this.run(`UPDATE books SET audio_pack = NULL, audio_names = NULL, audio_ready = 0, audio_at = NULL,
+                audio_first = NULL, audio_dropped = 1 WHERE key = ?`, old.key);
+              old.audio_pack = null;
+            }
+          }
+          if (b.narrator && bestHolders.includes(b.narrator)) bestHolders.unshift(b.narrator);
+          this.ask(b, 'audio', bestHolders, online, byId, now);
+        }
+      }
+    }
+  }
+
+  // Asks one holder to upload (online first, a Mac before an iPhone); keeps the ask for 30 minutes.
+  ask(b, kind, holders, online, byId, now) {
+    const by = b[`${kind}_by`], asked = b[`${kind}_asked`] ?? 0;
+    if (by && holders.includes(by) && now - asked < UPLOAD_GRACE_MS) return;
+    const order = [...new Set(holders)].filter((id) => byId[id]).sort((x, y) =>
+      (online.has(y) - online.has(x)) || ((byId[y].kind === 'mac') - (byId[x].kind === 'mac')));
+    const pick = order.find((id) => id !== by || now - asked >= UPLOAD_GRACE_MS) ?? order[0];
+    if (pick) this.run(`UPDATE books SET ${kind}_by = ?, ${kind}_asked = ? WHERE key = ?`, pick, now, b.key);
+  }
+
+  view(id, seen, now) {
+    const holdings = this.rows(`SELECT * FROM holdings`);
+    const books = this.rows(`SELECT * FROM books`).map((b) => ({
+      key: b.key, meta: b.meta, sentences: b.sentences, narrator: b.narrator ?? null,
+      ...(b.deleted_at != null ? { deletedAt: b.deleted_at } : {}),
+      epub: b.epub_pack ? { pack: b.epub_pack, names: JSON.parse(b.epub_names ?? '[]') } : null,
+      audio: b.audio_pack ? { pack: b.audio_pack, names: JSON.parse(b.audio_names ?? '[]'), ready: b.audio_ready } : null,
+      holders: Object.fromEntries(holdings.filter((h) => h.key === b.key).map((h) => [h.device, { epub: !!h.epub, ready: h.ready, left: h.left_ }])),
+    }));
+    const tasks = { upload: [], narrate: [] };
+    for (const b of this.rows(`SELECT key, epub_by, audio_by, narrator, deleted_at FROM books WHERE deleted_at IS NULL`)) {
+      if (b.epub_by === id) tasks.upload.push({ key: b.key, kind: 'epub' });
+      if (b.audio_by === id) tasks.upload.push({ key: b.key, kind: 'audio' });
+      if (b.narrator === id) tasks.narrate.push(b.key);
+    }
+    const places = this.rows(`SELECT * FROM places WHERE device != ?`, id)
+      .filter((p) => (seen?.[p.device] ?? 0) < p.version).map((p) => ({ device: p.device, version: p.version, data: p.data }));
+    const settings = Object.fromEntries(this.rows(`SELECT * FROM settings`).map((s) => [s.field, { data: s.data, at: s.at }]));
+    const devices = this.rows(`SELECT * FROM devices`).map((d) => ({
+      id: d.id, kind: d.kind, info: d.info, online: this.online(d.id, now), lastSeen: d.last_seen,
+      narrator: d.narrator ? JSON.parse(d.narrator) : null,
+    }));
+    return { now, devices, books, places, settings, tasks };
+  }
+
+  async webSocketMessage() {}
   async webSocketClose(ws, code) { try { ws.close(code === 1005 ? 1000 : code, 'bye'); } catch {} }
   async webSocketError() {}
 }

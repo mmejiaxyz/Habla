@@ -1,251 +1,142 @@
-# Cloud bridge (sync away from home)
+# Accounts and the cloud (v2, 2026-11-28)
 
-## Accounts
+One **account** = one library on every device. The account lives in a Cloudflare **Durable
+Object** (`Account`, one per account). It is the single source of truth: which devices
+belong, which books the account has, who holds what, who narrates, what travels. Devices
+report what they have and do what the account tells them. Cloudflare never sees a word of a
+book, a title, a place or a device name: those are sealed on the devices.
 
-An **account** is one library on every device: a name plus a QR code. The QR code is a
-`habla://account?u=<bridge url>&k=<library key, base64url>&n=<name>` link (the iPhone Camera
-opens it; on a Mac the same text is pasted under Account…). It holds the library key, so it
-works like a password. It replaces iPhone↔Mac pairing: phones paired earlier turn the bridge
-key their Mac gave them into the account on first launch.
+## The rules
 
-- **Name**: `settings.name` + `nameChangedAt` in the device documents (latest rename wins),
-  merged separately from the voice.
-- **Whole library everywhere**: any device holding a book that another device of the account
-  lacks (not in its `has` at that revision, and not in its `declined`) may send it. Of the
-  holders of the newest revision that are running (or itself), a Mac sends before an iPhone,
-  then the lowest device id, so one device uploads. Unfinished books wait until narrated,
-  except an iPhone's copy of a book no Mac has: it goes once and the Mac finishes it. iPhones
-  upload books only on Wi-Fi (not mobile data or Low Data Mode).
-- **Deletes everywhere**: `ledger: [{bookID, deleted, at}]` in every device document (latest
-  event per book wins; future dates are clamped). A device removes local books the ledger says
-  are deleted; importing the book again records it as added. An iPhone's "Remove download" is
-  local only: the book goes in that iPhone's `declined`, so nobody sends it there again.
-- **Wi-Fi without pairing**: from the library key, HKDF also derives `lan` (HMAC key) and
-  `lan-token`. A Mac advertises `acct = HMAC(lan, "tag")[0..8]` in its Bonjour TXT record. An
-  iPhone of the account sends a random `X-Habla-Nonce` to `GET /v1`; the Mac answers
-  `accountProof = HMAC(lan, fingerprint ‖ nonce)` for its own certificate. The iPhone checks
-  it against the certificate it saw (a machine in the middle has another one and no key), pins
-  that certificate, and authenticates with `X-Habla-Token: <lan-token>`.
+- **The EPUB is the book.** A book's id is the SHA-256 prefix of its EPUB file. Every device
+  keeps the original EPUB (`Library/Originals/<id>.epub`) and builds the readable text from it
+  itself, in the background (`BookImporter`). Only two things ever travel: the **EPUB** and
+  the **audio** (per chapter, with its timing). Audio is matched to the text by a per-chapter
+  text fingerprint, so audio from another device is installed only on identical text.
+- **Adding a book anywhere offers it to every device.** The device that added it registers it
+  with the account and uploads the EPUB; every other device fetches it and builds the text.
+- **The account decides who narrates.** For each book not yet narrated, it picks the online
+  device that finishes first (`(queued + sentences) / speed`, Macs before iPhones; an iPhone
+  only when no Mac is online). The choice sticks until that device has been away 15 minutes,
+  or a Mac comes online while an iPhone narrates. Narrated chapters go up as they finish (at
+  most every 10 minutes, and at the end) and every device takes them.
+- **Deleting a book anywhere deletes it everywhere** (a tombstone in the account; adding the
+  same EPUB again later brings it back). An iPhone's "Remove download" is local only.
+- **Joining**: a device of the account shows a **one-time code** (`XXXX-XXXX-XXXX`, 15 minutes,
+  works once) and its QR code; the new device types or scans it. Creating an account needs the
+  Worker's server key (only the owner has it). There is no other way in: no link codes, no
+  invites, no "help narrate only".
 
+## Keys (made and kept on the devices)
 
-On the same Wi-Fi, the iPhone and the Mac talk directly (Bonjour + pinned TLS, see `Sync/`).
-When they are apart, they meet through a **Cloudflare bridge**: one Worker in front of one
-R2 bucket. Cloudflare only ever stores **ciphertext under random-looking names**. It never
-holds a key, never sees a title, a position or a word of a book.
+The account's random 32-byte **library key** never reaches Cloudflare. HKDF-SHA256 (salt
+`habla-bridge-v1`) derives: `enc` (AES-GCM for everything sealed), `name` (HMAC for opaque
+names), `token` (the bearer token; the Worker stores only its SHA-256 = the account id),
+`lan` / `lan-token` (Wi-Fi proof, see `Sync/`).
 
-- **Positions and markers** (bookmarks + underlines) are kept on the bridge permanently, as
-  one small encrypted document per device.
-- **Books** only pass through: the Mac uploads every newly finished book (encrypted, in
-  chunks), each paired phone downloads it, and the Mac deletes it once every phone has it
-  (or after 14 days). EPUBs imported on the phone travel to the Mac the same way.
-- LAN sync stays the fast path. The bridge is the fallback and runs alongside it.
+**One-time code.** 60 random bits, shown in Crockford base32. Both sides compute
+`s = PBKDF2-SHA256(code, "habla-join-v1", 200 000)`, then `id = HKDF(s, "id")` and
+`wrap = HKDF(s, "wrap")`. The inviting device stores `{id, AES-GCM(wrap, {libraryKey, name})}`
+on the Worker; the joining device sends `id` and gets the sealed blob back (then it's gone).
+The Worker only ever has `id` and ciphertext.
 
-## Pieces
+Opaque names: a book is `HMAC(name, "book/<id>")` to the account; transit chunks are
+`HMAC(name, "epub/<id>/<sha256>#n")` or `HMAC(name, "blob/<id>/<sha256>#n")` (content-named,
+so unchanged audio is never sent twice and a stopped download resumes). Sealed bodies are
+`0x01 ‖ nonce ‖ ciphertext ‖ tag` with the logical name as AAD, padded (4 KiB for documents,
+64 KiB for chunks).
 
-| Piece | Where |
+## Worker API (`Cloudflare/habla-bridge/worker.js`)
+
+`Authorization: Bearer <token>` and `X-Habla-Device: <device id>` (16–40 hex) on every
+authenticated call.
+
+| Call | What |
 |---|---|
-| Worker + D1 ledger | `Cloudflare/habla-bridge/` (`worker.js`, `schema.sql`, `wrangler.toml`) |
-| R2 bucket | `habla-bridge` (new, only the Worker binding can reach it: no S3 API keys exist) |
-| D1 database | `habla-bridge-ledger` (object ledger + usage counters) |
-| Swift client | `Packages/HablaCore/Sources/HablaCore/Bridge/` |
+| `POST /v2/accounts` | Create: `X-Habla-Enroll: <server key>`, `{tokenHash}`. `201` / `200` if it exists. |
+| `POST /v2/codes` | `{id, wrapped}` → a one-time code's sealed key, 15 minutes, ≤ 3 open per account. |
+| `POST /v2/join` | No auth. `{id}` → `{wrapped}` once; `404` if used, expired or wrong. |
+| `POST /v2/sync` | The device's report → the account's view and this device's tasks (below). |
+| `POST /v2/devices/remove` | `{id}`: forget a device (wiped or replaced). |
+| `GET /v2/listen` | WebSocket (hibernating): the account says `changed` when something moved. |
+| `GET/PUT/DELETE /v1/transit/{name}`, `GET /v1/transit`, `GET /v1/usage` | Chunks in transit and the free-tier usage (unchanged). |
 
-## Never reaching the paid tier
+### `POST /v2/sync`
 
-The Cloudflare free allowances are per **account** and are shared with the Portfolio
-project (`portfolio-media` bucket, `portfolio-media` Worker). The Worker refuses work
-*before* doing it once a budget is used up, so the account can't cross into paid usage
-because of Habla. Budgets (env vars in `wrangler.toml`):
-
-| Allowance (free, per account) | Habla's hard cap | Notes |
-|---|---|---|
-| R2 storage 10 GB-month | `STORAGE_CAP_BYTES` = 8 GiB **minus Portfolio's bucket size** | the daily cron measures `portfolio-media` |
-| R2 Class A 1 M / month | `CLASS_A_CAP` = 400 000 / month | writes and lists made by the Worker |
-| R2 Class B 10 M / month | `CLASS_B_CAP` = 4 000 000 / month | reads made by the Worker |
-| Workers 100 k requests / day | `REQUESTS_CAP_DAY` = 20 000 / day | leaves plenty for Portfolio |
-| D1 100 k rows written / day | follows from the request cap (≤ 3 writes per request) | |
-
-Expected use (1 iPhone + 2 Macs): the Macs don't poll. Each keeps one live connection to a
-Durable Object (free plan, SQLite-backed): an idle hibernating connection isn't billed,
-protocol pings are free, and the nudges it sends are outgoing messages, also free. Opening a
-connection is one request (after sleep or a network change). The iPhone touches the bridge a
-few times a day (open, book closed, background). Roughly a few dozen requests a day, a few
-thousand R2 operations a month, storage only while a book is in transit (a 10-hour book is
-≈ 300 MB). On the free plan a Durable Object limit only makes calls fail until 00:00 UTC.
-Cost: $0, and the caps keep it $0 even if something misbehaves.
-
-When a cap is reached the Worker answers `429` (ops/requests) or `507` (storage) with a JSON
-`{ "error": "...", "cap": "..." }`, and the apps quietly stay on LAN sync until the period
-rolls over. Nothing is ever retried in a tight loop.
-
-## Keys (all derived on the devices)
-
-The Mac creates a random 32-byte **library key** once. It reaches phones only over the
-paired, certificate-pinned LAN connection (in the pairing answer, and via
-`GET /v1/bridge` for phones paired earlier). From it, HKDF-SHA256 (salt `habla-bridge-v1`):
-
-| info | use |
-|---|---|
-| `enc` | AES-GCM-256 key for every object |
-| `name` | HMAC-SHA256 key for object names |
-| `token` | the bearer token sent to the Worker (base64url of 32 bytes) |
-
-- **Object name** = first 40 hex chars of `HMAC(name, logicalName)`, e.g. logical
-  `state/<deviceID>`, `book/<bookID>/<revision>/<path>#<chunk>` or `epub/<id>#<chunk>`.
-  The bridge sees only the hex.
-- **Object body** = `0x01 ‖ nonce(12) ‖ ciphertext ‖ tag(16)` with **AAD = logicalName**
-  (for device documents AAD is `"state"`, and the document must name the device whose slot
-  it sits in), so a blob can't be moved under another name. Plaintext is padded before sealing (state
-  documents to a multiple of 4 KiB, book chunks to a multiple of 64 KiB) so sizes leak little.
-- The Worker stores only `SHA-256(token)` as the space id. Enrolling a space needs the
-  `ENROLL_SECRET` Worker secret, which only the Mac has (it enrolls once, then forgets the
-  secret), or a one-time invite made by an enrolled library (see below).
-
-## Worker API
-
-All requests: `Authorization: Bearer <token>`. Names match `^[0-9a-f]{40}$`.
-Responses are JSON unless a body is returned.
-
-| Method & path | Purpose |
-|---|---|
-| `POST /v1/spaces` | Enroll. Header `X-Habla-Enroll: <ENROLL_SECRET>`, body `{"tokenHash":"<sha256 hex>"}`. `201` new, `200` exists. |
-| `POST /v1/spaces` (invite) | Header `X-Habla-Invite: <invite>` instead of the secret: someone else's library. The invite is consumed atomically; `403` if used, expired, or `MAX_SPACES` libraries already exist (`cap: "spaces"`). |
-| `POST /v1/invites` | `201 {invite, expires}`: a one-time invite (7 days, only its SHA-256 stored). At most 3 open per library (`429`). |
-| `GET /v1/usage` | `{storageBytes, portfolioBytes, storageCapBytes, classA, classACap, classB, classBCap, requestsToday, requestsCapDay}` |
-| `GET /v1/state` | `[{name, size, etag, updated}]` of this space's state objects (from the D1 ledger, no R2 list) |
-| `GET /v1/state/{name}` | body (`If-None-Match` → `304`) |
-| `PUT /v1/state/{name}` | body ≤ 1 MiB → `{etag}` |
-| `DELETE /v1/state/{name}` | |
-| `GET /v1/transit` | `[{name, size, updated}]` |
-| `PUT /v1/transit/{name}` | body ≤ 16 MiB, `Content-Length` required. Storage is reserved before the upload. |
-| `GET /v1/transit/{name}` | body |
-| `DELETE /v1/transit/{name}` | frees the storage at once |
-
-Cron (daily): measure `portfolio-media`, delete transit objects older than 14 days,
-reconcile the ledger with the bucket.
-
-## Devices sharing one library
-
-Usually one iPhone and two Macs. The iPhone gets the library key from the Mac it is paired
-with (over the pinned LAN link). The second Mac joins with a **link code** from the first
-(Habla → "Link another Mac…" → copy; on the other Mac "Join another Mac's library…" → paste).
-Anyone holding the key is one of your devices, so every device that checked in during the
-last 30 days receives every new book.
-
-### Help narrate only (helper Macs)
-
-A Mac joined with "Help narrate only" (`kind: "helper"`) narrates books sent to it and
-nothing else: its window shows no library (just "Helping narrate" and a percentage), it
-doesn't share on Wi-Fi, it merges no places or marks and publishes none, it never receives
-finished books, other devices don't wait for it to collect anything, and once every device
-has a book it narrated, it deletes its copy (a book that was already on that Mac is kept).
-It still holds the library key, so this is a behaviour, not a cryptographic wall.
-
-### Who narrates a new book
-
-"Running" needs no uploads: a Mac is running while its live connection (`GET /v1/listen`,
-WebSocket to the library's `Room` Durable Object) is open; the listing marks those devices
-`online`. Every request also carries `X-Habla-Device` (the device's opaque document name) so
-the Worker notes `seen`; a device without a live connection counts as running for 5
-minutes after it looked. Whenever a device uploads its document, the Room sends "changed" to
-every other connected device, which syncs at once. Each document carries
-`narrator = {sentencesPerSecond, queuedSentences, measured}`, its speed measured from real
-narrations (a guess until then: Mac 1.0, iPhone 0.2) and the work already queued.
-
-**One voice for the account.** `settings.voice` (Heart unless changed in Settings on a Mac;
-latest change wins) is used by every device for every book, and an EPUB sent to another
-device carries it, so nobody has to check which voice to use.
-
-When a book lands on a device (dropped on a Mac with auto-narrate on, or added on the
-iPhone), that device takes fresh check-ins and picks, among the Macs active in the last
-12 minutes and itself, the one with the earliest finish
-`(queued + book sentences) / speed` (a remote Mac's time is padded by 10 % + 60 s for the
-transfer). The EPUB goes to it: over Wi-Fi when that's the paired Mac at home, else through
-the bridge as an `epub` transfer with `target`. That device narrates in the background and
-then sends the narrated book to the others. If no Mac is running, the iPhone narrates it
-itself. A target that stays quiet for 20 minutes without collecting the EPUB is replaced by
-the next best running device (or the sender). Books in languages Habla can't narrate just
-go to the Mac as text.
-
-## Device documents
-
-Each device writes only its own document (logical name `state/<deviceID>`), so devices
-never overwrite each other. Readers merge every document:
+Report (everything sealed is base64 of a sealed blob):
 
 ```jsonc
 {
-  "v": 1, "deviceID": "...", "deviceName": "...", "kind": "mac" | "phone",
-  "updatedAt": "...",
-  "positions": [ReadingPosition],          // merged with ReadingPosition.merge (latest wins)
-  "markers": [Marker],                     // merged by id, latest updatedAt wins, tombstones kept
-  "has": [{"bookID": "...", "revision": 3}],   // books on this device
-  "outbox": [Transfer],                    // narrated books for the others; EPUBs for their narrator
-  "recipients": ["deviceID", ...],         // who must collect each book
-  "received": ["transferID", ...],         // EPUBs this device collected
-  "lastActive": "...",                     // heartbeat
-  "narrator": {"sentencesPerSecond": 1.3, "queuedSentences": 2400, "measured": true},
-  "wants": ["bookID", ...]                 // books it is asking for right now (on demand)
+  "kind": "mac" | "phone",
+  "info": "<sealed {name, endpoints}>",
+  "narrator": {"sps": 1.3, "queued": 2400} | null,     // null: can't narrate now
+  "books": [{"key": "<40 hex>", "epub": true, "ready": 12, "left": 340}],   // what it holds: chapters narrated, sentences left
+  "added": [{"key", "meta": "<sealed {id,title,author,language}>", "sentences", "narratable", "at"}],
+  "deleted": [{"key", "at"}],
+  "uploaded": [{"key", "kind": "epub"|"audio", "names": ["<40 hex>"...], "pack": "<sealed>", "ready": 12}],
+  "requested": ["key"], "declined": ["key"],
+  "places": "<sealed {positions, markers}>" | null,      // only when it changed
+  "seen": {"<device>": <placesVersion>},                 // places it already has
+  "settings": {"voice": {"data", "at"}, "name": {"data", "at"}}   // only what changed here
 }
 ```
 
-### Books travel on demand
+Answer:
 
-A book goes through the bridge only while a device asks for it. Each device lists `wants`
-in its document: books another device holds a newer copy of, minus deleted, declined and
-revisions that turned out to add no audio. A Mac asks while it runs; an iPhone only while
-Habla is on screen and away from the home Mac (at home books come over Wi-Fi). The sender
-uploads a book only for a requester that is running (live connection, or checked in within
-5 minutes), and deletes its copy as soon as nobody running asks for it any more: the
-requester got it (any route), removed it, went to the background, or went quiet. While it
-has books waiting, a Mac looks again every 5½ minutes, so a phone that vanished leaves
-nothing behind; the 14-day cron stays as the last resort.
+```jsonc
+{
+  "devices": [{"id", "kind", "info", "online", "lastSeen", "narrator"}],
+  "books": [{"key", "meta", "sentences", "narrator": "<device>"|null, "deletedAt"?,
+             "epub": {"pack", "names"}|null, "audio": {"pack", "names", "ready"}|null,
+             "holders": {"<device>": {"epub", "ready", "left"}}}],
+  "places": [{"device", "version", "data"}],             // only newer than `seen`
+  "settings": {"voice": {"data", "at"}, "name": {"data", "at"}},
+  "tasks": {"upload": [{"key", "kind"}], "narrate": ["key"]}
+}
+```
 
-**Freshly narrated books are parked.** When a Mac (or helper) finishes narrating a book here,
-it uploads it right away without being asked (`keepUntil` = 5 days), so a phone opening
-away from home gets it at once. It stays until every device of the account has it, then
-goes; after 5 days it goes unless someone is asking right then. Parked books need no
-5-minute re-checks (the Mac's nudges and 6-hourly look cover them). Helper Macs list their finished
-jobs in `has` so the account's devices can ask for them. A document without `wants` (an
-older version) is treated as asking for everything it lacks.
+**Transit.** An EPUB goes up when a device lacks it; audio goes up when a device has fewer
+narrated chapters than the best copy. One device is told to upload (the best holder, online
+first); the chunks go through `/v1/transit` (storage and operation caps apply), then the device
+reports them in `uploaded`. The account deletes the chunks itself once every device has what
+they carry (devices seen in the last 30 days, minus those that declined the book), or the book
+is deleted. At most **3 books' audio** wait in the cloud for the whole account (the oldest is
+dropped and goes again only if a device asks for it with Download); EPUBs are small and
+always go (at most 20 at once).
 
-While a book is on its way the iPhone shows it: a banner at the top of the library ("Getting
-“Title”" with a sweeping bar until the first bytes, then a filling bar and percentage) and
-the book's cover filling in from the bottom with a badge. It looks again every 12 s while
-waiting, for at most 15 minutes per visit.
+**Online** = an open `/v2/listen` connection, or a sync in the last 2 minutes. Macs keep the
+connection open; the iPhone while Habla is on screen.
 
-`Transfer = {id, kind: "book"|"epub", bookID?, revision?, filename?, manifest?: BookManifest,
-files: [{path, size, sha256, chunks: Int}], createdAt, target?}`. A receiver rebuilds each file from
-its chunks, checks the SHA-256 from the manifest, and installs the book the same way LAN
-sync does, when it has more audio than the local copy (or the same audio, newer). The sender
-deletes the chunks once every recipient lists the book in `has` or in `declined` (EPUBs: once
-the target lists the transfer id in `received`). See **Accounts** below for who sends a book.
+**Migration from v1.** The account id is the v1 space id, so devices already in a v1 account
+are in the v2 account with no step: their first sync reports their books and their old
+deletions. v1's per-device state documents, link codes, invites and helper Macs are gone.
 
-## Cadence
+## Never reaching the paid tier
 
-- Phone: only when Habla opens (what changed elsewhere comes in), when a book (reader or
-  player) closes and when Habla goes to the background (the place and marks go out), plus
-  when you add a book or it finishes narrating one. Nothing while you read. At home the Mac
-  still gets places and marks live over Wi-Fi (free).
-- Mac: when nudged (instantly), when its connection reopens (wake, network change), when a
-  reader window closes, a few seconds after a book finishes narrating or the voice changes,
-  and once every 6 hours as a safety net. Documents are downloaded only if they changed, and
-  its own is uploaded only if it changed.
-- Only documents whose `etag` changed are downloaded.
+The free allowances are per Cloudflare account and shared with Portfolio. The Worker refuses
+work before doing it once a budget is used (`429` ops/requests, `507` storage, JSON
+`{error, cap}`); the apps pause the cloud until the period rolls over and keep Wi-Fi sync.
 
-## Helping someone else's library
+| Allowance (free) | Habla's cap |
+|---|---|
+| R2 storage 10 GB | `STORAGE_CAP_BYTES` 8 GiB minus Portfolio's bucket |
+| R2 Class A 1 M / month | `CLASS_A_CAP` 400 000 |
+| R2 Class B 10 M / month | `CLASS_B_CAP` 4 000 000 |
+| Workers 100 k / day | `REQUESTS_CAP_DAY` 20 000 |
+| Durable Objects 100 k requests / day, 5 GB | one request per sync; hibernating sockets are free while idle |
 
-Someone with their own Mac and iPhone can have their books narrated by your Mac, without
-either library seeing the other's books.
+Expected use (1 iPhone + 2 Macs): a few dozen syncs a day, a few thousand R2 operations a
+month, storage only while books are in transit. Daily cron: measure Portfolio, delete transit
+older than 14 days, reconcile the ledger with the bucket, drop expired codes.
 
-1. Your Mac: Link another Mac… → Create invite code. They paste it in “Join another Mac's
-   library…”: their Mac makes its own library key, enrolls with the invite (once, 7 days),
-   and now has its own link code. Their iPhone gets their key from their Mac as usual.
-2. Your Mac: paste their link code under “Help someone else”. It is saved in
-   `Security/helping.json` (0600). Your Mac runs one extra `BridgeSync` per helped library with
-   role `helper` (own state file `helping-<id>.json`, own listener), so it can be chosen to
-   narrate there.
-3. Books it narrates for them are **guest books**: in the same Library folder (one narration
-   queue), but hidden from your shelf, your LAN server (catalog and every by-id route answer
-   404), your own bridge (never published, never in `has`) and the Xteink. Once their devices
-   collect a book, it is deleted here. If you add the same book yourself, it becomes yours.
+## Deploying
 
-Every library shares the account's free-tier caps; `MAX_SPACES` (8) bounds how many exist.
+From `Cloudflare/habla-bridge/` (wrangler logged in to the Portfolio Cloudflare account):
+
+```sh
+npx wrangler d1 execute habla-bridge-ledger --remote --file schema.sql   # adds the codes table
+npx wrangler deploy                                                      # adds the Account class
+```
+
+The apps read the Worker's address from `HablaBridgeURL` in their Info.plist, filled at build
+time from `HABLA_BRIDGE_URL` (a GitHub Actions secret for releases); it is never committed.

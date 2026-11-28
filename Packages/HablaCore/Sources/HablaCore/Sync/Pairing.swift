@@ -58,11 +58,10 @@ public enum Pairing {
     }
 }
 
-/// What the QR code on a Mac without an account carries (`habla://join`; older Macs showed
-/// `habla://pair`). An iPhone of the account scans it and hands the account to that Mac over
-/// the pinned connection, proving it saw the one-time code.
+/// The older Wi-Fi pairing QR code (`habla://pair`). Accounts join with a one-time code
+/// (`JoinCode`, `habla://join?c=`) instead.
 public struct PairingInvite: Equatable, Sendable {
-    public var host = "join"
+    public var host = "pair"
     public var libraryID: String
     public var name: String
     public var address: String?       // "10.0.0.20:8787" (hint; Bonjour finds it anyway)
@@ -83,12 +82,12 @@ public struct PairingInvite: Equatable, Sendable {
     }
 
     public init?(url: URL) {
-        guard url.scheme == "habla", url.host == "pair" || url.host == "join",
+        guard url.scheme == "habla", url.host == "pair",
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
         func v(_ k: String) -> String? { items.first { $0.name == k }?.value }
         guard let id = v("id"), let f = v("f"), let c = v("c"), f.count == 64 else { return nil }
         self.init(libraryID: id, name: v("n") ?? "Mac", address: v("a"), fingerprint: f, code: c)
-        host = url.host ?? "join"
+        host = url.host ?? "pair"
     }
 }
 
@@ -118,15 +117,6 @@ public struct PairRequest: Codable, Sendable {
     public var deviceID: String
     public var deviceName: String
     public var proof: String
-}
-
-/// An iPhone handing its account to a Mac that has none (`POST /v1/join`).
-public struct JoinRequest: Codable, Sendable {
-    public var deviceID: String
-    public var deviceName: String
-    public var proof: String
-    /// The account link (habla://account…), sent only inside the pinned TLS connection.
-    public var account: String
 }
 
 public struct PairResponse: Codable, Sendable {

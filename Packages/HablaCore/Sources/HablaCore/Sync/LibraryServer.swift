@@ -39,17 +39,10 @@ public final class LibraryServer: @unchecked Sendable {
     public var onDevice: (@Sendable (PairedDevice) -> Void)?
     /// Bookmarks and underlines, exchanged with paired devices.
     public var markers: MarkerStore?
-    /// The cloud bridge settings handed to paired phones (only over this pinned, paired link).
-    public var bridgeConfig: (@Sendable () -> BridgeConfig?)?
-    /// Books narrated here for someone else's library: never listed, served or synced to this
-    /// Mac's own devices (they don't exist as far as the server is concerned).
-    public var isHidden: (@Sendable (String) -> Bool)?
     /// The account (one library on every device): its devices get in with the account's Wi-Fi
     /// token, and the hello proves to them that this Mac holds the account key. Set before
     /// `start` (the Bonjour record carries the account tag); restart the server when it changes.
     public let account = Locked<BridgeKeys?>(nil)
-    /// A Mac without an account: an iPhone that scanned its join QR code hands one over.
-    public var onJoin: (@Sendable (BridgeConfig, String?) -> Void)?
     /// Largest EPUB accepted from the iPhone.
     static let maxUpload = 200 * 1024 * 1024
 
@@ -175,21 +168,6 @@ public final class LibraryServer: @unchecked Sendable {
         return .json(PairResponse(token: token, libraryID: libraryID, name: serviceName))
     }
 
-    /// Takes the account an iPhone hands over: only while this Mac has none, only with the
-    /// one-time code from its QR code, bound to this server's certificate.
-    func join(_ r: HTTPRequest) -> HTTPResponse {
-        guard account.value == nil, let pairing, let onJoin else { return .text(409, "This Mac already has an account") }
-        guard let req = try? JSON.decoder.decode(JoinRequest.self, from: r.body),
-              !req.deviceID.isEmpty, req.deviceID.count <= 64 else { return .text(400, "Bad request") }
-        guard pairing.verify(proof: req.proof, fingerprint: tlsFingerprint ?? "", deviceID: req.deviceID) else {
-            return .text(403, "Wrong or expired code")
-        }
-        guard let (config, name) = AccountCode.parse(req.account) else { return .text(400, "Bad account") }
-        onJoin(config, name)
-        onEvent?("JOINED from \(req.deviceName)")
-        return .json(["status": "joined"])
-    }
-
     // MARK: - Books sent from the iPhone
 
     /// `PUT /v1/inbox/<book id>` with the EPUB as body, `X-Habla-SHA256` (full hex digest) and
@@ -240,7 +218,6 @@ public final class LibraryServer: @unchecked Sendable {
             return .json(hello)
         }
         if parts == ["v1", "pair"], r.method == "POST" { return pair(r) }
-        if parts == ["v1", "join"], r.method == "POST" { return join(r) }
 
         let token = r.headers[SyncProtocol.tokenHeader.lowercased()]
         if let keys = account.value, let token, Self.constantTimeEqual(token, keys.lanToken) {
@@ -292,10 +269,6 @@ public final class LibraryServer: @unchecked Sendable {
             markers.merge(incoming)
             return .json(markers.all)
 
-        case ("GET", "v1", 2) where parts[1] == "bridge":
-            guard registry != nil, let config = bridgeConfig?() else { return .text(404, "No cloud bridge") }
-            return .json(config)
-
         case ("PUT", "v1", 3) where parts[1] == "inbox":
             return receiveInbox(r, id: parts[2])
 
@@ -310,14 +283,8 @@ public final class LibraryServer: @unchecked Sendable {
         return zip(x, y).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0
     }
 
-    /// The books this library shows its devices (hidden guest books left out).
+    /// Every book in the library.
     public func manifests() -> [BookManifest] {
-        let hidden = isHidden
-        return allManifests().filter { !(hidden?($0.id) ?? false) }
-    }
-
-    /// Every bundle in the folder, guest books included: for the Mac app itself only.
-    public func allManifests() -> [BookManifest] {
         let items = (try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)) ?? []
         return items.filter { $0.pathExtension == BookBundle.fileExtension }
             .compactMap { try? BookBundle(url: $0).manifest() }
@@ -325,7 +292,7 @@ public final class LibraryServer: @unchecked Sendable {
     }
 
     func manifest(_ id: String) -> BookManifest? {
-        guard id.allSatisfy({ $0.isLetter || $0.isNumber }), !(isHidden?(id) ?? false) else { return nil }
+        guard id.allSatisfy({ $0.isLetter || $0.isNumber }) else { return nil }
         return try? BookBundle(url: BookBundle.url(for: id, in: library)).manifest()
     }
 

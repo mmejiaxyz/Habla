@@ -9,7 +9,9 @@ CREATE TABLE IF NOT EXISTS objects (
 CREATE TABLE IF NOT EXISTS usage (period TEXT NOT NULL, metric TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (period, metric));
 -- When each device last looked (name = its state object's name): "is it running?" without uploads.
 CREATE TABLE IF NOT EXISTS seen (space TEXT NOT NULL, name TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (space, name));
--- One-time invites an enrolled library makes for someone else's library (hash only; 7 days).
-CREATE TABLE IF NOT EXISTS invites (hash TEXT PRIMARY KEY, space TEXT NOT NULL, expires INTEGER NOT NULL);
+-- One-time join codes (15 minutes): id = a PBKDF2/HKDF derivative of the code, wrapped = the
+-- account key sealed with a key only the code makes.
+CREATE TABLE IF NOT EXISTS codes (id TEXT PRIMARY KEY, space TEXT NOT NULL, wrapped TEXT NOT NULL, expires INTEGER NOT NULL);
+DROP TABLE IF EXISTS invites;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('reserved_bytes', '0'), ('portfolio_bytes', '0'), ('last_cron', '');

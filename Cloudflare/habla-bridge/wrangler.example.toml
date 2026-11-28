@@ -20,9 +20,18 @@ bucket_name = "portfolio-media"
 name = "ROOM"
 class_name = "Room"
 
+# The account: devices, books, who narrates, what travels (Docs/cloud-bridge.md).
+[[durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "Account"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Account"]
 
 [[d1_databases]]
 binding = "DB"
@@ -35,7 +44,7 @@ CLASS_A_CAP = "400000"             # per month (free: 1 M for the account)
 CLASS_B_CAP = "4000000"            # per month (free: 10 M)
 REQUESTS_CAP_DAY = "20000"         # per day (free: 100 k Worker requests, 100 k D1 writes)
 TRANSIT_TTL_DAYS = "14"
-MAX_SPACES = "8"                   # libraries on the bridge (yours + people you help)
+MAX_SPACES = "8"                   # accounts on this Worker
 MAX_STATE_BYTES = "1048576"
 MAX_TRANSIT_BYTES = "16777216"
 
