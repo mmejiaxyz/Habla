@@ -154,7 +154,11 @@ public struct StudioWindowView: View {
                 deviceRow(on: false, name: "No account yet",
                           detail: "Join your account to share your library with your iPhone and your other Macs.")
             } else {
-                deviceRow(on: true, name: store.accountName ?? "Your account", detail: "This Mac · \(store.books.count) book\(store.books.count == 1 ? "" : "s")")
+                Text(store.accountName ?? "Your account").font(Theme.grotesk(13)).fontWeight(.semibold).foregroundStyle(Theme.text)
+                    .lineLimit(1).padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 2)
+                    .accessibilityLabel("Account: \(store.accountName ?? "Your account")")
+                deviceRow(on: true, name: store.serverName.replacingOccurrences(of: "Habla on ", with: ""),
+                          detail: "This Mac · \(store.books.count) book\(store.books.count == 1 ? "" : "s")")
                 if store.accountDevices.isEmpty {
                     deviceRow(on: false, name: "No other devices yet", detail: "Account… → Add a device shows a code for your iPhone or another Mac.")
                 }
