@@ -797,9 +797,15 @@ export class Account {
       holders: Object.fromEntries(holdings.filter((h) => h.key === b.key).map((h) => [h.device, { epub: !!h.epub, ready: h.ready, left: h.left_ }])),
     }));
     const tasks = { upload: [], narrate: [] };
+    const ereaderOn = this.row(`SELECT v FROM meta WHERE k = 'ereader'`)?.v === '1';
+    const onShelf = new Set(this.rows(`SELECT key FROM shelf`).map((r) => r.key));
     for (const b of this.rows(`SELECT key, epub_by, audio_by, shelf_by, narrator, deleted_at FROM books WHERE deleted_at IS NULL`)) {
       if (b.epub_by === id) tasks.upload.push({ key: b.key, kind: 'epub' });
-      if (b.shelf_by === id) tasks.upload.push({ key: b.key, kind: 'shelf' });
+      // The Xteink's catalog: any device holding the EPUB adds it (older versions ignore the task,
+      // so one chosen device could keep the catalog empty).
+      if (ereaderOn && !onShelf.has(b.key) && holdings.some((h) => h.key === b.key && h.device === id && h.epub)) {
+        tasks.upload.push({ key: b.key, kind: 'shelf' });
+      }
       if (b.audio_by === id) tasks.upload.push({ key: b.key, kind: 'audio' });
       if (b.narrator === id) tasks.narrate.push(b.key);
     }
@@ -812,7 +818,6 @@ export class Account {
     }));
     const ereader = this.rows(`SELECT * FROM ereader_progress`).map((p) => ({ document: p.document, progress: p.progress,
       percentage: p.percentage, device: p.device, timestamp: p.timestamp }));
-    const ereaderOn = this.row(`SELECT v FROM meta WHERE k = 'ereader'`)?.v === '1';
     return { now, devices, books, places, settings, tasks, ereader, ereaderOn };
   }
 
