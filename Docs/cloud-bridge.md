@@ -140,3 +140,28 @@ npx wrangler deploy                                                      # adds 
 
 The apps read the Worker's address from `HablaBridgeURL` in their Info.plist, filled at build
 time from `HABLA_BRIDGE_URL` (a GitHub Actions secret for releases); it is never committed.
+
+## The Xteink (2026-11-28)
+
+The Xteink can't hold the account key, so it talks to the account in the clear, by the owner's
+choice: its **positions** (KOReader sync) and a **catalog** of the account's EPUBs (OPDS). This
+works with no Mac on. It is the one exception to "Cloudflare never sees anything".
+
+- **Login**: a Mac in the account sets the Xteink up once over Wi-Fi (File Transfer open): a
+  random username and password, registered with `POST /v2/ereader` (the Worker stores only the
+  password's MD5, which KOReader sync sends). One per account; a new one replaces the old.
+- **Positions**: `/kosync/users/auth`, `PUT /kosync/syncs/progress`, `GET /kosync/syncs/progress/{doc}`
+  (x-auth-user + x-auth-key, or HTTP Basic). The account keeps the newest record per document
+  (document = KOReader partial MD5 of the EPUB; progress = an XPointer; percentage; time). Devices
+  get the records in `/v2/sync` and turn them into (chapter, sentence) with their own copy of the
+  text; they write their own newest place back in the same form (`ereader` in the report), so the
+  Xteink opens where the iPhone left off. CrossPoint 2.0 syncs only from its reader menu.
+- **Catalog**: `GET /opds` (HTTP Basic) lists the account's books by **title and subtitle only**
+  (`BookTitle.clean`: no Project Gutenberg, university, press, shop or series notes); `GET
+  /opds/books/{key}.epub` serves the EPUB unchanged (so its digest matches for position sync).
+  The account asks a device holding the EPUB to upload it (`PUT /v2/shelf/{key}`, plain); a
+  deleted book leaves the catalog and the cloud at once. The Xteink downloads into `/Habla`,
+  named by title. Positions are sent without titles (`koSendMetadata` off).
+- **What Cloudflare can read**: those EPUBs (their content and their own metadata inside), their
+  titles, and the Xteink's reading positions. Nothing of the other devices.
+- Deploy adds the `ereaders` table: run `schema.sql` again, then `wrangler deploy`.

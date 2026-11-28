@@ -13,5 +13,7 @@ CREATE TABLE IF NOT EXISTS seen (space TEXT NOT NULL, name TEXT NOT NULL, at INT
 -- account key sealed with a key only the code makes.
 CREATE TABLE IF NOT EXISTS codes (id TEXT PRIMARY KEY, space TEXT NOT NULL, wrapped TEXT NOT NULL, expires INTEGER NOT NULL);
 DROP TABLE IF EXISTS invites;
+-- The Xteink's login per account (KOReader sync sends md5(password); OPDS sends Basic auth).
+CREATE TABLE IF NOT EXISTS ereaders (user TEXT PRIMARY KEY, space TEXT NOT NULL, key_md5 TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('reserved_bytes', '0'), ('portfolio_bytes', '0'), ('last_cron', '');

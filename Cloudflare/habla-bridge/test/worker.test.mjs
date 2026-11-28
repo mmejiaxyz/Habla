@@ -210,3 +210,44 @@ test('places and settings: sealed, newest wins, only what changed comes back', a
   await call(e, 'POST', '/v2/devices/remove', { body: JSON.stringify({ id: PHONE }), headers: { 'x-habla-device': MAC_A } });
   assert.ok(!(await sync(e, MAC_A, mac(1))).devices.some((d) => d.id === PHONE));
 });
+
+test('the Xteink: its own login, positions in KOReader form, and a catalog of the account’s EPUBs', async () => {
+  const e = await enrolled();
+  const md5 = (s) => createHash('md5').update(s).digest('hex');
+  const ko = (method, path, { body, user = 'habla-x4', pass = 'pw' } = {}) => worker.fetch(new Request('https://b' + path, {
+    method, body, headers: { 'x-auth-user': user, 'x-auth-key': md5(pass), accept: 'application/vnd.koreader.v1+json' } }), e);
+  assert.equal((await ko('GET', '/kosync/users/auth')).status, 401, 'no login yet');
+  assert.equal((await call(e, 'POST', '/v2/ereader', { body: JSON.stringify({ user: 'habla-x4', keyMd5: md5('pw') }), headers: { 'x-habla-device': MAC_A } })).status, 201);
+  assert.equal((await ko('GET', '/kosync/users/auth')).status, 200);
+  assert.equal((await ko('GET', '/kosync/users/auth', { pass: 'nope' })).status, 401);
+
+  // A Mac holds a book: the account asks it for a catalog copy.
+  const k = key('9');
+  let v = await sync(e, MAC_A, mac(1, { added: [{ key: k, meta: 'm', sentences: 5, narratable: false, at: Date.now() - 1000 }], books: [{ key: k, epub: true, ready: 0, left: 0 }] }));
+  assert.ok(v.tasks.upload.some((t) => t.key === k && t.kind === 'shelf'));
+  const put = await call(e, 'PUT', `/v2/shelf/${k}`, { body: 'EPUB-BYTES', headers: { 'x-habla-device': MAC_A, 'x-habla-title': encodeURIComponent('Pride and Prejudice') } });
+  assert.equal(put.status, 200);
+  v = await sync(e, MAC_A, mac(1, { books: [{ key: k, epub: true, ready: 0, left: 0 }] }));
+  assert.ok(!v.tasks.upload.some((t) => t.kind === 'shelf'), 'asked once');
+
+  // The catalog: Basic auth, title only, the bytes as they are.
+  const basic = (path, pass = 'pw') => worker.fetch(new Request('https://b' + path, { headers: { authorization: 'Basic ' + btoa(`habla-x4:${pass}`) } }), e);
+  assert.equal((await basic('/opds', 'nope')).status, 401);
+  const feed = await (await basic('/opds')).text();
+  assert.ok(feed.includes('<title>Pride and Prejudice</title>') && feed.includes(`/opds/books/${k}.epub`));
+  assert.equal(await (await basic(`/opds/books/${k}.epub`)).text(), 'EPUB-BYTES');
+
+  // Positions: the Xteink puts, a phone reads and puts a newer one, the Xteink gets it.
+  await ko('PUT', '/kosync/syncs/progress', { body: JSON.stringify({ document: 'abc', progress: '/body/DocFragment[3]/body/p[2]/text().0', percentage: 0.2, device: 'CrossPoint', device_id: 'x' }) });
+  const p = await sync(e, PHONE, { kind: 'phone' });
+  assert.equal(p.ereader[0].progress, '/body/DocFragment[3]/body/p[2]/text().0');
+  await sync(e, PHONE, { kind: 'phone', ereader: [{ document: 'abc', progress: '/body/DocFragment[4]/body/p[1]/text().0', percentage: 0.3, device: 'Habla', timestamp: Math.floor(Date.now() / 1000) + 5 }] });
+  const got = await (await ko('GET', '/kosync/syncs/progress/abc?position_kinds=locator,percentage')).json();
+  assert.equal(got.progress, '/body/DocFragment[4]/body/p[1]/text().0');
+  assert.equal((await ko('GET', '/kosync/syncs/progress/unknown')).status, 204, 'no progress yet');
+
+  // Deleted: gone from the catalog and the cloud.
+  await sync(e, PHONE, { kind: 'phone', deleted: [{ key: k, at: Date.now() - 10 }] });
+  assert.ok(!(await (await basic('/opds')).text()).includes(k));
+  assert.equal((await basic(`/opds/books/${k}.epub`)).status, 404);
+});

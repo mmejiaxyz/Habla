@@ -150,12 +150,16 @@ public struct CrossPointDevice: Sendable, Hashable {
 
     public struct OPDSServer: Decodable, Sendable { public var index: Int?; public var name: String; public var url: String }
 
-    /// Updates the entry at `index` (firmware: POST /api/opds with "index").
-    public func updateOPDSServer(index: Int, name: String, url: String) async throws {
+    /// Updates the entry at `index` (firmware: POST /api/opds with "index"). The catalog's
+    /// login is sent with HTTP Basic auth by the device.
+    public func updateOPDSServer(index: Int, name: String, url: String, username: String? = nil, password: String? = nil) async throws {
         var r = URLRequest(url: baseURL.appendingPathComponent("api/opds"))
         r.httpMethod = "POST"
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        r.httpBody = try JSONSerialization.data(withJSONObject: ["index": index, "name": name, "url": url])
+        var body: [String: Any] = ["index": index, "name": name, "url": url]
+        if let username { body["username"] = username }
+        if let password { body["password"] = password }
+        r.httpBody = try JSONSerialization.data(withJSONObject: body)
         _ = try await send(r)
     }
 
@@ -163,11 +167,14 @@ public struct CrossPointDevice: Sendable, Hashable {
         try JSONDecoder().decode([OPDSServer].self, from: try await send(URLRequest(url: baseURL.appendingPathComponent("api/opds"))))
     }
 
-    public func addOPDSServer(name: String, url: String) async throws {
+    public func addOPDSServer(name: String, url: String, username: String? = nil, password: String? = nil) async throws {
         var r = URLRequest(url: baseURL.appendingPathComponent("api/opds"))
         r.httpMethod = "POST"
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        r.httpBody = try JSONSerialization.data(withJSONObject: ["name": name, "url": url])
+        var body: [String: Any] = ["name": name, "url": url]
+        if let username { body["username"] = username }
+        if let password { body["password"] = password }
+        r.httpBody = try JSONSerialization.data(withJSONObject: body)
         _ = try await send(r)
     }
 
@@ -201,6 +208,26 @@ public struct XteinkSync {
     public var folder = "Habla"
 
     public static let catalogName = "Habla (Mac)"
+    public static let cloudCatalogName = "Habla"
+
+    /// Points the device at the account in the cloud: KOReader sync and the catalog (both with
+    /// the account's Xteink login), downloads into `/Habla` named by title only, and no titles
+    /// sent with positions (whole-file matching needs none).
+    public func configureCloud(sync: URL, catalog: URL, username: String, password: String) async throws {
+        try await device.setSettings([
+            "koServerUrl": sync.absoluteString,
+            "koServerType": 1, "koMatchMethod": 1,
+            "koUsername": username, "koPassword": password,
+            "koSendMetadata": 0, "koSyncBehavior": 1, "koSyncOnSleep": 1,
+            "opdsFilenameFormat": 2, "opdsDownloadFolder": "/\(folder)",
+        ])
+        let servers = (try? await device.opdsServers()) ?? []
+        if let mine = servers.first(where: { $0.name == Self.cloudCatalogName || $0.name == Self.catalogName }), let i = mine.index {
+            try await device.updateOPDSServer(index: i, name: Self.cloudCatalogName, url: catalog.absoluteString, username: username, password: password)
+        } else {
+            try await device.addOPDSServer(name: Self.cloudCatalogName, url: catalog.absoluteString, username: username, password: password)
+        }
+    }
 
     public init(device: CrossPointDevice) { self.device = device }
 
@@ -238,15 +265,22 @@ public struct XteinkSync {
 
     /// Takes books deleted from the account off the device: only Habla's own copies in `/Habla`
     /// (named "<title>-<id prefix>.epub"), never the user's other files. Returns the ids done.
-    public func removeBooks(_ ids: Set<String>) async throws -> Set<String> {
+    /// `titles`: the books' titles, for copies the device downloaded from the catalog itself
+    /// (it names those "<title>.epub").
+    public func removeBooks(_ ids: Set<String>, titles: [String: String] = [:]) async throws -> Set<String> {
         let dir = "/\(folder)"
         let root = try await device.files(in: "/")
         guard root.contains(where: { $0.isDirectory && $0.name == folder }) else { return ids }
         let existing = try await device.files(in: dir)
+        func plain(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
         var done = Set<String>()
         for id in ids {
             let suffix = "-\(id.prefix(8)).epub"
-            for f in existing where !f.isDirectory && f.name.hasSuffix(suffix) { try await device.delete("\(dir)/\(f.name)") }
+            let byTitle = titles[id].map { plain(BookTitle.clean($0)) }
+            for f in existing where !f.isDirectory && (f.name.hasSuffix(suffix)
+                || (byTitle.map { !$0.isEmpty && plain(String(f.name.dropLast(5))) == $0 } ?? false && f.name.hasSuffix(".epub"))) {
+                try await device.delete("\(dir)/\(f.name)")
+            }
             done.insert(id)
         }
         return done

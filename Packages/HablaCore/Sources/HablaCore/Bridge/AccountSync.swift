@@ -100,6 +100,9 @@ public actor AccountSync {
         var narratingOn: [String: String] = [:]
         var pausedUntil: Date?
         var lastSync: Date?
+        /// Xteink positions this device wrote (document → seconds), so each goes once.
+        var ereaderSent: [String: Int64] = [:]
+        var ereaderOn = false
 
         init() {}
         init(from d: Decoder) throws {
@@ -119,6 +122,8 @@ public actor AccountSync {
             narratingOn = try c.decodeIfPresent([String: String].self, forKey: .narratingOn) ?? [:]
             pausedUntil = try c.decodeIfPresent(Date.self, forKey: .pausedUntil)
             lastSync = try c.decodeIfPresent(Date.self, forKey: .lastSync)
+            ereaderSent = try c.decodeIfPresent([String: Int64].self, forKey: .ereaderSent) ?? [:]
+            ereaderOn = try c.decodeIfPresent(Bool.self, forKey: .ereaderOn) ?? false
         }
     }
     var saved: Saved
@@ -270,7 +275,7 @@ public actor AccountSync {
             if try await fetch(view, downloads: downloads, skipAudio: skipAudio, into: &result) { changed = true }
             var uploaded: [Uploaded] = []
             if uploads { uploaded = try await performUploads(view) }
-            if changed || !uploaded.isEmpty {
+            if changed || !uploaded.isEmpty || changedShelf {
                 view = try await round(uploaded: uploaded)
                 let again = apply(view)
                 result.narrate = again.narrate
@@ -293,7 +298,9 @@ public actor AccountSync {
     struct Uploaded: Codable { var key: String; var kind: String; var names: [String]; var pack: String; var ready: Int? }
     struct Setting: Codable { var data: String; var at: Int64 }
     struct WireNarrator: Codable { var sps: Double; var queued: Int }
+    struct EReaderRecord: Codable { var document: String; var progress: String; var percentage: Double; var device: String?; var timestamp: Int64 }
     struct Report: Codable {
+        var ereader: [EReaderRecord] = []
         var kind: String; var info: String; var narrator: WireNarrator?
         var books: [Holding]; var added: [Added]; var deleted: [Deleted]; var uploaded: [Uploaded]
         var requested: [String]; var declined: [String]; var places: String?; var seen: [String: Int]
@@ -310,6 +317,8 @@ public actor AccountSync {
         struct Place: Decodable { var device: String; var version: Int; var data: String }
         struct Tasks: Decodable { struct Upload: Decodable { var key: String; var kind: String }; var upload: [Upload]; var narrate: [String] }
         var devices: [Device]; var books: [Book]; var places: [Place]; var settings: [String: Setting]; var tasks: Tasks
+        var ereader: [EReaderRecord]?
+        var ereaderOn: Bool?
     }
 
     struct DeviceInfo: Codable { var deviceID: String; var name: String; var endpoints: [String] }
@@ -367,13 +376,64 @@ public actor AccountSync {
         if let n = saved.settings.name, let at = saved.settings.nameAt, saved.sentNameAt != at {
             settings["name"] = Setting(data: try seal(["name": n], "settings/name", pad: 256), at: Self.ms(at))
         }
-        return Report(kind: kind.rawValue,
+        var report = Report(kind: kind.rawValue,
                       info: try seal(DeviceInfo(deviceID: deviceID, name: deviceName, endpoints: endpoints), "info/\(serverID)", pad: 512),
                       narrator: narrator.map { WireNarrator(sps: $0.sentencesPerSecond, queued: $0.queuedSentences) },
                       books: books, added: added, deleted: deleted, uploaded: uploaded,
                       requested: saved.requested.map { bookKey($0) }, declined: saved.declined.map { bookKey($0) },
                       places: hash == saved.placesHash ? nil : try seal(places, "places/\(serverID)", pad: BridgeKeys.statePadding),
                       seen: saved.seen, settings: settings)
+        report.ereader = ereaderWrites(local)
+        return report
+    }
+
+    // MARK: The Xteink's positions (KOReader form, kept plain on the account by the owner's choice)
+
+    /// This device's newest places, as positions the Xteink reads (only new ones, never one the
+    /// Xteink itself made).
+    func ereaderWrites(_ local: [BookManifest]) -> [EReaderRecord] {
+        guard ereaderOn else { return [] }
+        var out: [EReaderRecord] = []
+        for m in local {
+            guard let p = progress.position(for: m.id), !p.deviceID.hasPrefix("koreader:") else { continue }
+            let ts = Int64(p.updatedAt.timeIntervalSince1970)
+            guard ts > saved.ereaderSent[m.koreaderDigest] ?? 0,
+                  let map = try? KOReaderPositionMap(bundle: BookBundle(url: BookBundle.url(for: m.id, in: library))),
+                  let xp = map.xpointer(chapter: p.chapter, sentence: p.sentence) else { continue }
+            out.append(EReaderRecord(document: m.koreaderDigest, progress: xp,
+                                     percentage: map.percentage(chapter: p.chapter, sentence: p.sentence), device: "Habla", timestamp: ts))
+            pendingEReader[m.koreaderDigest] = ts
+        }
+        return out
+    }
+    var pendingEReader: [String: Int64] = [:]
+    /// Whether the account has an Xteink (seen in its view).
+    var ereaderOn: Bool { saved.ereaderOn }
+
+    /// Positions the Xteink synced, taken in where they're newer than this device's.
+    func applyEReader(_ records: [EReaderRecord]) {
+        let local = localBooks()
+        for r in records where r.device != "Habla" {
+            guard let m = local.first(where: { $0.koreaderDigest == r.document || $0.koreaderFilenameDigest == r.document }) else { continue }
+            let at = Date(timeIntervalSince1970: TimeInterval(r.timestamp))
+            if let p = progress.position(for: m.id), p.updatedAt >= at { continue }
+            guard let map = try? KOReaderPositionMap(bundle: BookBundle(url: BookBundle.url(for: m.id, in: library))),
+                  let pos = map.position(for: r.progress) else { continue }
+            progress.merge(ReadingPosition(bookID: m.id, chapter: pos.chapter, sentence: pos.sentence, mode: .reading,
+                                           updatedAt: at, deviceID: "koreader:\(r.device ?? "Xteink")", fraction: r.percentage))
+        }
+    }
+
+    /// Sets the Xteink up for this account: a fresh login, registered with the account. Returns
+    /// what to write on the device (sync and catalog addresses, username, password).
+    public func setupEReader() async throws -> (sync: URL, catalog: URL, user: String, password: String) {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let password = bytes.map { String(format: "%02x", $0) }.joined()
+        let user = "habla-" + String(keys.objectName("ereader/\(deviceID)").prefix(8))
+        try await client.registerEReader(user: user, keyMD5: KOReaderDigest.filename(password))
+        saved.ereaderOn = true; saved.ereaderSent = [:]; save()
+        return (config.url.appendingPathComponent("kosync"), config.url.appendingPathComponent("opds"), user, password)
     }
 
     /// Takes the account's view in. Called after every report (the report it answers has gone).
@@ -381,6 +441,9 @@ public actor AccountSync {
         var result = SyncResult()
         // What was sent is acknowledged.
         if let h = sending.places { saved.placesHash = h }
+        saved.ereaderSent.merge(pendingEReader) { max($0, $1) }; pendingEReader = [:]
+        if let on = view.ereaderOn { saved.ereaderOn = on }
+        if let records = view.ereader { applyEReader(records) }
         if let at = sending.voiceAt, at.timeIntervalSince1970 > 0 { saved.sentVoiceAt = at }
         if let at = sending.nameAt { saved.sentNameAt = at }
 
@@ -559,8 +622,10 @@ public actor AccountSync {
 
     // MARK: Sending what the account asks for
 
+    var changedShelf = false
     func performUploads(_ view: View) async throws -> [Uploaded] {
         var out: [Uploaded] = []
+        changedShelf = false
         guard !view.tasks.upload.isEmpty else { return out }
         let local = Dictionary(localBooks().map { (bookKey($0.id), $0) }, uniquingKeysWith: { a, _ in a })
         var present = Set(try await client.list(.transit).map(\.name))
@@ -573,6 +638,14 @@ public actor AccountSync {
                 guard try await roomFor([(file, logical)], present: present, title: m.title, id: m.id) else { continue }
                 let names = try await upload(file, from: url, logical: logical, present: &present, id: m.id, title: m.title, total: file.size, offset: 0)
                 out.append(Uploaded(key: t.key, kind: "epub", names: names, pack: try seal(EPUBPack(file: file), "epubpack/\(t.key)", pad: 1024), ready: nil))
+            } else if t.kind == "shelf" {
+                let url = BookImporter.originalURL(for: m.id, in: library)
+                guard FileManager.default.fileExists(atPath: url.path) else { continue }
+                report(.init(id: "shelf-" + m.id, bookID: m.id, title: m.title, kind: .sending, state: .running(nil), route: "Xteink catalog"))
+                try await client.putShelf(t.key, file: url, title: BookTitle.clean(m.title))
+                saved.ereaderOn = true
+                report(.init(id: "shelf-" + m.id, bookID: m.id, title: m.title, kind: .sending, state: .done, route: "Xteink catalog"))
+                changedShelf = true
             } else if t.kind == "audio" {
                 let bundle = BookBundle(url: BookBundle.url(for: m.id, in: library))
                 let chapters = audioChapters(m, bundle)

@@ -101,6 +101,23 @@ public struct BridgeClient: Sendable {
         return try await perform(r).0
     }
 
+    /// The Xteink's login for this account (replaces any earlier one).
+    func registerEReader(user: String, keyMD5: String) async throws {
+        var r = request("v2/ereader", method: "POST")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONEncoder().encode(["user": user, "keyMd5": keyMD5])
+        _ = try await perform(r)
+    }
+
+    /// A book for the Xteink's catalog: the EPUB as it is, named by its title only.
+    func putShelf(_ key: String, file: URL, title: String) async throws {
+        var r = request("v2/shelf/\(key)", method: "PUT")
+        r.setValue("application/epub+zip", forHTTPHeaderField: "Content-Type")
+        r.setValue(title.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "", forHTTPHeaderField: "X-Habla-Title")
+        r.timeoutInterval = 300
+        _ = try await perform(r, upload: try Data(contentsOf: file))
+    }
+
     func removeDevice(_ id: String) async throws {
         var r = request("v2/devices/remove", method: "POST")
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")

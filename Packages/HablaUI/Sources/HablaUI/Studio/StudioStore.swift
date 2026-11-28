@@ -1058,9 +1058,16 @@ public final class StudioStore: ObservableObject {
         set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: "habla.xteinkRemove") }
     }
 
+    /// Titles of books waiting to be taken off the Xteink (its catalog copies are named by title).
+    var xteinkRemovalTitles: [String: String] {
+        get { (UserDefaults.standard.dictionary(forKey: "habla.xteinkRemoveTitles") as? [String: String]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "habla.xteinkRemoveTitles") }
+    }
+
     func removeFromXteink(_ id: String) {
-        guard Features.xteink, books.contains(where: { $0.id == id }) else { return }
+        guard Features.xteink, let m = books.first(where: { $0.id == id }) else { return }
         var r = xteinkRemovals; r.insert(id); xteinkRemovals = r
+        var t = xteinkRemovalTitles; t[id] = m.title; xteinkRemovalTitles = t
         kickXteink()
     }
 
@@ -1103,6 +1110,29 @@ public final class StudioStore: ObservableObject {
             let status = try await device.status()
             let name = "Xteink \(status.device ?? "")".trimmingCharacters(in: .whitespaces)
             var creds = xteinkCredentials() ?? XteinkCredentials(username: "habla", password: String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)).lowercased())
+            // In an account, the Xteink syncs with the account in the cloud and takes its books
+            // from the account's catalog: it works without this Mac. Only setting it up and
+            // taking deleted books off need this Mac (and File Transfer).
+            if let bridge {
+                let target = "cloud:" + bridge.config.url.absoluteString + "#v1"
+                if creds.configuredFor != target {
+                    xteink = .working("Setting up \(name)…")
+                    let login = try await bridge.setupEReader()
+                    try await sync.configureCloud(sync: login.sync, catalog: login.catalog, username: login.user, password: login.password)
+                    saveXteinkCredentials(XteinkCredentials(username: login.user, password: login.password, configuredFor: target))
+                    kickBridge(after: 1)                         // the catalog fills up now
+                }
+                let removals = xteinkRemovals
+                if !removals.isEmpty {
+                    let removed = try await sync.removeBooks(removals, titles: xteinkRemovalTitles)
+                    xteinkRemovals = xteinkRemovals.subtracting(removed)
+                    var t = xteinkRemovalTitles; for id in removed { t[id] = nil }; xteinkRemovalTitles = t
+                }
+                xteinkLastSync = Date()
+                UserDefaults.standard.set(xteinkLastSync, forKey: "habla.xteinkLast")
+                xteink = .done("\(name) · syncs with your account; books in its Habla catalog")
+                return
+            }
             let target = macURL.absoluteString + "#keyed"   // set up before the catalog had a key: redo once
             if creds.configuredFor != target {
                 xteink = .working("Setting up \(name)…")

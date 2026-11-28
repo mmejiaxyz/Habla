@@ -21,6 +21,17 @@ async function sha256hex(s) {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// MD5 (KOReader sync sends md5(password)). Workers' subtle crypto has it; node (tests) uses node:crypto.
+async function md5hex(s) {
+  try {
+    const d = await crypto.subtle.digest('MD5', enc.encode(s));
+    return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    const { createHash } = await import('node:crypto');
+    return createHash('md5').update(s).digest('hex');
+  }
+}
+
 function sameSecret(a, b) {
   const x = enc.encode(a), y = enc.encode(b);
   let diff = x.length ^ y.length;
@@ -86,7 +97,7 @@ async function nudge(env, space, from) {
 const bare = (etag) => (etag ?? '').replace(/^W\//, '').replace(/"/g, '');
 
 async function put(env, request, space, kind, name) {
-  const max = num(env, kind === 'state' ? 'MAX_STATE_BYTES' : 'MAX_TRANSIT_BYTES');
+  const max = kind === 'shelf' ? (num(env, 'MAX_SHELF_BYTES') || 64 * 1048576) : num(env, kind === 'state' ? 'MAX_STATE_BYTES' : 'MAX_TRANSIT_BYTES');
   const length = Number(request.headers.get('content-length'));
   if (!request.headers.has('content-length') || !Number.isInteger(length) || length < 0) return fail(411, 'length required');
   if (length > max) return fail(413, 'too large');
@@ -164,7 +175,7 @@ const dailyCap = (env) => take(env, day(), 'requests', num(env, 'REQUESTS_CAP_DA
 async function handle(request, env) {
   const url = new URL(request.url);
   const parts = url.pathname.split('/').filter(Boolean);                   // ["v1", "state", name?]
-  if (parts[0] !== 'v1' && parts[0] !== 'v2') return fail(404, 'not found');
+  if (!['v1', 'v2', 'kosync', 'opds'].includes(parts[0])) return fail(404, 'not found');
 
   // Creating an account needs the server key (only the owner has it). The account id is the
   // token's hash, so a v1 space is already a v2 account.
@@ -195,6 +206,9 @@ async function handle(request, env) {
     if (!row) return fail(404, 'code used, expired or wrong');
     return json({ wrapped: row.wrapped });
   }
+
+  // The Xteink (KOReader sync + OPDS): its own username and password, set on it by a Mac.
+  if (parts[0] === 'kosync' || parts[0] === 'opds') return ereader(request, env, parts);
 
   const auth = request.headers.get('authorization') ?? '';
   if (!auth.startsWith('Bearer ') || auth.length < 20) return fail(401, 'unauthorized');
@@ -322,6 +336,27 @@ async function v2(request, env, space, parts) {
   }
   if (!DEVICE.test(device)) return fail(400, 'bad device');
   const a = account(env, space);
+  // The Xteink's login for this account (one per account; a new one replaces the old).
+  if (parts[1] === 'ereader' && parts.length === 2 && request.method === 'POST') {
+    let body;
+    try { body = await request.json(); } catch { return fail(400, 'bad json'); }
+    if (!/^[a-z0-9-]{8,40}$/.test(body?.user ?? '') || !/^[0-9a-f]{32}$/.test(body?.keyMd5 ?? '')) return fail(400, 'bad login');
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM ereaders WHERE space = ?1 OR user = ?2').bind(space, body.user),
+      env.DB.prepare('INSERT INTO ereaders (user, space, key_md5) VALUES (?1, ?2, ?3)').bind(body.user, space, body.keyMd5),
+    ]);
+    await a.fetch(new Request('https://account/ereader-on', { method: 'POST', headers: { 'x-habla-space': space, 'x-habla-device': device }, body: '{}' }));
+    return json({ ok: true }, 201);
+  }
+  // A book for the Xteink's catalog: the EPUB as it is (readable by Cloudflare, by the owner's choice).
+  if (parts[1] === 'shelf' && parts.length === 3 && NAME.test(parts[2]) && request.method === 'PUT') {
+    const title = decodeURIComponent(request.headers.get('x-habla-title') ?? '').slice(0, 200);
+    const r = await put(env, request, space, 'shelf', parts[2]);
+    if (r.status !== 200) return r;
+    await a.fetch(new Request('https://account/shelf-add', { method: 'POST', headers: { 'x-habla-space': space, 'x-habla-device': device },
+      body: JSON.stringify({ key: parts[2], title, size: Number(request.headers.get('content-length')) }) }));
+    return r;
+  }
   if (!a) return fail(503, 'no account object');
   const forward = (path, init) => a.fetch(new Request(`https://account${path}`, init), {});
   const headers = { 'x-habla-space': space, 'x-habla-device': device };
@@ -334,6 +369,54 @@ async function v2(request, env, space, parts) {
   if (body.length > (num(env, 'MAX_SYNC_BYTES') || 2 * 1048576)) return fail(413, 'too large');   // places ≤ 1 MiB + the book list
   if (parts[1] === 'sync' && parts.length === 2) return forward('/sync', { method: 'POST', headers, body });
   if (parts[1] === 'devices' && parts[2] === 'remove' && parts.length === 3) return forward('/remove', { method: 'POST', headers, body });
+  return fail(404, 'not found');
+}
+
+// KOReader sync (`/kosync/...`) and the OPDS catalog (`/opds`, `/opds/books/<key>.epub`) for the
+// Xteink. Login: x-auth-user + x-auth-key (md5 of the password), or HTTP Basic.
+async function ereader(request, env, parts) {
+  let user = request.headers.get('x-auth-user') ?? '', key = (request.headers.get('x-auth-key') ?? '').toLowerCase();
+  const basic = request.headers.get('authorization') ?? '';
+  if (basic.startsWith('Basic ')) {
+    try {
+      const [u, ...rest] = atob(basic.slice(6)).split(':');
+      if (!user) user = u;
+      if (!key) key = await md5hex(rest.join(':'));
+    } catch {}
+  }
+  if (parts[0] === 'kosync' && parts[1] === 'users' && parts[2] === 'create') return json({ username: user }, 201);
+  const row = user && key ? await env.DB.prepare('SELECT space, key_md5 FROM ereaders WHERE user = ?1').bind(user).first() : null;
+  if (!row || !sameSecret(key, row.key_md5)) {
+    return parts[0] === 'opds'
+      ? new Response('Unauthorized', { status: 401, headers: { 'www-authenticate': 'Basic realm="Habla"', 'content-length': '12' } })
+      : json({ message: 'Unauthorized' }, 401);
+  }
+  if (!(await dailyCap(env))) return fail(429, 'daily request cap reached', 'requests');
+  const a = account(env, row.space);
+  const call = (path, init = {}) => a.fetch(new Request(`https://account${path}`, { ...init, headers: { 'x-habla-space': row.space } }));
+  if (parts[0] === 'kosync') {
+    if (parts[1] === 'users' && parts[2] === 'auth') return json({ authorized: 'OK' });
+    if (parts[1] === 'syncs' && parts[2] === 'progress') {
+      if (request.method === 'PUT' && parts.length === 3) return call('/kosync-put', { method: 'POST', body: await request.text() });
+      if (request.method === 'GET' && parts.length === 4) return call(`/kosync-get?doc=${encodeURIComponent(parts[3])}`);
+    }
+    return json({ message: 'Not found' }, 404);
+  }
+  // OPDS
+  if (parts.length === 1) return call('/opds');
+  if (parts[1] === 'books' && parts.length === 3 && parts[2].endsWith('.epub')) {
+    const k = parts[2].slice(0, -5);
+    if (!NAME.test(k)) return fail(404, 'not found');
+    const has = await env.DB.prepare(`SELECT size FROM objects WHERE space = ?1 AND kind = 'shelf' AND name = ?2`).bind(row.space, k).first();
+    if (!has) return fail(404, 'not found');
+    if (!(await classB(env))) return fail(429, 'monthly read cap reached', 'classB');
+    const obj = await env.BRIDGE.get(`${row.space}/shelf/${k}`);
+    if (!obj) return fail(404, 'not found');
+    const title = (await (await call(`/shelf-title?key=${k}`)).text()) || 'Book';
+    const file = title.replace(/[\\/:*?"<>|\x00-\x1f]/g, '').trim().slice(0, 90) || 'Book';
+    return new Response(obj.body, { headers: { 'content-type': 'application/epub+zip', 'content-length': String(obj.size),
+      'content-disposition': `attachment; filename="${encodeURIComponent(file)}.epub"` } });
+  }
   return fail(404, 'not found');
 }
 
@@ -364,6 +447,11 @@ export class Account {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS requests (key TEXT, device TEXT, PRIMARY KEY (key, device))`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS places (device TEXT PRIMARY KEY, version INTEGER, data TEXT)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS settings (field TEXT PRIMARY KEY, data TEXT, at INTEGER)`);
+    // The Xteink's positions (KOReader sync: plain, by the owner's choice) and its catalog.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS ereader_progress (document TEXT PRIMARY KEY, progress TEXT, percentage REAL,
+      device TEXT, device_id TEXT, timestamp INTEGER)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS shelf (key TEXT PRIMARY KEY, title TEXT, size INTEGER, at INTEGER)`);
+    for (const col of ['shelf_by TEXT', 'shelf_asked INTEGER']) { try { this.sql.exec(`ALTER TABLE books ADD COLUMN ${col}`); } catch {} }
   }
 
   rows(q, ...args) { return this.sql.exec(q, ...args).toArray(); }
@@ -384,8 +472,63 @@ export class Account {
     let body;
     try { body = JSON.parse(await request.text() || '{}'); } catch { return json({ error: 'bad json' }, 400); }
     if (url.pathname === '/sync') return json(await this.sync(device, body));
+    if (url.pathname === '/kosync-put') {
+      if (typeof body.document !== 'string' || typeof body.progress !== 'string') return json({ message: 'Invalid request' }, 400);
+      const ts = Math.floor(Date.now() / 1000);
+      this.putProgress({ ...body, timestamp: ts });
+      this.notify('');
+      return json({ document: body.document, timestamp: ts });
+    }
+    if (url.pathname === '/kosync-get') {
+      const p = this.row(`SELECT * FROM ereader_progress WHERE document = ?`, (url.searchParams.get('doc') ?? '').toLowerCase());
+      if (!p) return new Response(null, { status: 204, headers: { 'content-type': 'application/json', 'content-length': '0' } });
+      return json({ document: p.document, progress: p.progress, percentage: p.percentage, device: p.device, device_id: p.device_id, timestamp: p.timestamp });
+    }
+    if (url.pathname === '/shelf-add') {
+      this.run(`INSERT OR REPLACE INTO shelf (key, title, size, at) VALUES (?, ?, ?, ?)`, body.key, String(body.title ?? ''), Number(body.size) || 0, Date.now());
+      this.run(`UPDATE books SET shelf_by = NULL WHERE key = ?`, body.key);
+      return json({ ok: true });
+    }
+    if (url.pathname === '/ereader-on') {
+      this.run(`INSERT OR REPLACE INTO meta (k, v) VALUES ('ereader', '1')`);
+      await this.plan(Date.now()); this.notify(device);
+      return json({ ok: true });
+    }
+    if (url.pathname === '/shelf-title') return new Response(this.row(`SELECT title FROM shelf WHERE key = ?`, url.searchParams.get('key'))?.title ?? '');
+    if (url.pathname === '/opds') return this.opds();
     if (url.pathname === '/remove') { await this.remove(String(body.id ?? '')); this.notify(device); return json({ ok: true }); }
     return json({ error: 'not found' }, 404);
+  }
+
+  // Newest position per document wins (KOReader timestamps are seconds).
+  putProgress(p) {
+    const doc = String(p.document).toLowerCase().slice(0, 64);
+    const cur = this.row(`SELECT timestamp FROM ereader_progress WHERE document = ?`, doc);
+    if (cur && cur.timestamp > p.timestamp) return;
+    this.run(`INSERT OR REPLACE INTO ereader_progress (document, progress, percentage, device, device_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)`,
+      doc, String(p.progress).slice(0, 2048), Number(p.percentage) || 0, String(p.device ?? 'Habla').slice(0, 60),
+      String(p.device_id ?? 'habla').slice(0, 60), Math.floor(Number(p.timestamp) || 0));
+  }
+
+  opds() {
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const iso = (t) => new Date(t).toISOString();
+    const entries = this.rows(`SELECT s.* FROM shelf s JOIN books b ON b.key = s.key WHERE b.deleted_at IS NULL ORDER BY s.title`).map((b) => `
+  <entry>
+    <title>${esc(b.title || 'Book')}</title>
+    <id>urn:habla:${b.key}</id>
+    <updated>${iso(b.at)}</updated>
+    <link rel="http://opds-spec.org/acquisition" href="/opds/books/${b.key}.epub" type="application/epub+zip" length="${b.size}"/>
+  </entry>`).join('');
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog">
+  <id>urn:habla:library</id>
+  <title>Habla</title>
+  <updated>${iso(Date.now())}</updated>
+  <link rel="self" href="/opds" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
+  <link rel="start" href="/opds" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>${entries}
+</feed>`;
+    return new Response(xml, { headers: { 'content-type': 'application/atom+xml;profile=opds-catalog;kind=acquisition' } });
   }
 
   online(id, now) {
@@ -409,6 +552,15 @@ export class Account {
       await this.env.BRIDGE?.delete(`${space}/transit/${n}`);
       await this.env.DB?.prepare(`DELETE FROM objects WHERE space = ?1 AND kind = 'transit' AND name = ?2`).bind(space, n).run();
     }
+  }
+
+  async dropShelf(key) {
+    const space = this.row(`SELECT v FROM meta WHERE k = 'space'`)?.v;
+    if (space) {
+      await this.env.BRIDGE?.delete(`${space}/shelf/${key}`);
+      await this.env.DB?.prepare(`DELETE FROM objects WHERE space = ?1 AND kind = 'shelf' AND name = ?2`).bind(space, key).run();
+    }
+    this.run(`DELETE FROM shelf WHERE key = ?`, key);
   }
 
   async remove(id) {
@@ -487,6 +639,9 @@ export class Account {
         this.run(`DELETE FROM requests WHERE key = ?`, u.key);
       }
     }
+    for (const p of Array.isArray(r.ereader) ? r.ereader : []) {
+      if (typeof p?.document === 'string' && typeof p.progress === 'string') this.putProgress(p);
+    }
     if (str(r.places, 1048576)) {
       const v = (this.row(`SELECT version FROM places WHERE device = ?`, id)?.version ?? 0) + 1;
       this.run(`INSERT OR REPLACE INTO places (device, version, data) VALUES (?, ?, ?)`, id, v, r.places);
@@ -512,6 +667,8 @@ export class Account {
       this.rows(`SELECT device, version FROM places ORDER BY device`),
       this.rows(`SELECT field, at FROM settings ORDER BY field`),
       this.rows(`SELECT id, info FROM devices ORDER BY id`),
+      this.rows(`SELECT document, timestamp FROM ereader_progress ORDER BY document`),
+      this.rows(`SELECT key FROM shelf ORDER BY key`),
     ];
     return JSON.stringify(parts);
   }
@@ -529,6 +686,9 @@ export class Account {
     for (const b of books.filter((b) => b.deleted_at != null)) {
       await this.dropBlobs([...JSON.parse(b.epub_names ?? '[]'), ...JSON.parse(b.audio_names ?? '[]')]);
       this.run(`UPDATE books SET epub_pack = NULL, epub_names = NULL, audio_pack = NULL, audio_names = NULL, narrator = NULL WHERE key = ?`, b.key);
+      if (this.row(`SELECT key FROM shelf WHERE key = ?`, b.key)) {
+        await this.dropShelf(b.key);
+      }
       if (now - b.deleted_at > EXPECTED_MS) this.run(`DELETE FROM books WHERE key = ?`, b.key);
     }
     const live = books.filter((b) => b.deleted_at == null).sort((a, b) => a.added_at - b.added_at);
@@ -536,6 +696,7 @@ export class Account {
     const declined = this.rows(`SELECT * FROM declined`);
     const requests = this.rows(`SELECT * FROM requests`);
     const macsOnline = [...online].filter((id) => byId[id]?.kind === 'mac' && queue[id]);
+    const ereaderOn = this.row(`SELECT v FROM meta WHERE k = 'ereader'`)?.v === '1';
 
     for (const b of live) {
       const held = holdings.filter((h) => h.key === b.key);
@@ -578,6 +739,12 @@ export class Account {
         const holders = held.filter((h) => h.epub).map((h) => h.device);
         const inFlight = live.filter((x) => x.epub_pack).length;
         if (holders.length && inFlight < MAX_EPUBS) this.ask(b, 'epub', holders, online, byId, now);
+      }
+
+      // The Xteink's catalog: every book's EPUB, once an Xteink is set up for this account.
+      if (ereaderOn && !this.row(`SELECT key FROM shelf WHERE key = ?`, b.key)) {
+        const holders = held.filter((h) => h.epub).map((h) => h.device);
+        if (holders.length) this.ask(b, 'shelf', holders, online, byId, now);
       }
 
       // The audio: up while anyone has less than the best copy.
@@ -630,8 +797,9 @@ export class Account {
       holders: Object.fromEntries(holdings.filter((h) => h.key === b.key).map((h) => [h.device, { epub: !!h.epub, ready: h.ready, left: h.left_ }])),
     }));
     const tasks = { upload: [], narrate: [] };
-    for (const b of this.rows(`SELECT key, epub_by, audio_by, narrator, deleted_at FROM books WHERE deleted_at IS NULL`)) {
+    for (const b of this.rows(`SELECT key, epub_by, audio_by, shelf_by, narrator, deleted_at FROM books WHERE deleted_at IS NULL`)) {
       if (b.epub_by === id) tasks.upload.push({ key: b.key, kind: 'epub' });
+      if (b.shelf_by === id) tasks.upload.push({ key: b.key, kind: 'shelf' });
       if (b.audio_by === id) tasks.upload.push({ key: b.key, kind: 'audio' });
       if (b.narrator === id) tasks.narrate.push(b.key);
     }
@@ -642,7 +810,10 @@ export class Account {
       id: d.id, kind: d.kind, info: d.info, online: this.online(d.id, now), lastSeen: d.last_seen,
       narrator: d.narrator ? JSON.parse(d.narrator) : null,
     }));
-    return { now, devices, books, places, settings, tasks };
+    const ereader = this.rows(`SELECT * FROM ereader_progress`).map((p) => ({ document: p.document, progress: p.progress,
+      percentage: p.percentage, device: p.device, timestamp: p.timestamp }));
+    const ereaderOn = this.row(`SELECT v FROM meta WHERE k = 'ereader'`)?.v === '1';
+    return { now, devices, books, places, settings, tasks, ereader, ereaderOn };
   }
 
   async webSocketMessage() {}

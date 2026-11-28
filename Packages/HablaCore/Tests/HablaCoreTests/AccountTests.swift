@@ -150,3 +150,57 @@ final class AccountTests: XCTestCase {
         XCTAssertEqual(gone.deleted, [m.id])
     }
 }
+
+extension AccountTests {
+    /// The Xteink through the cloud: its catalog holds the account's EPUBs (title only), its
+    /// positions reach the iPhone, and the iPhone's place reaches it, with no Mac in between.
+    func testXteinkThroughTheCloud() async throws {
+        let config = try await AccountSync.createAccount(at: url, serverKey: "s3cret")
+        let mac = device("mac-a", .mac, config), phone = device("iphone-1", .phone, config)
+        let m = try BookImporter().importEPUB(at: Fixtures.writeSampleEPUB(to: mac.library.deletingLastPathComponent()), into: mac.library).manifest()
+        await mac.sync.recordAdded(m.id)
+        let login = try await mac.sync.setupEReader()
+        for _ in 0..<2 { for d in [mac, phone] { try await d.sync.sync() } }
+
+        func call(_ path: String, method: String = "GET", body: Data? = nil, basic: Bool = false) async throws -> (Data, Int) {
+            var r = URLRequest(url: url.appendingPathComponent(path))
+            r.httpMethod = method; r.httpBody = body
+            if basic { r.setValue("Basic " + Data("\(login.user):\(login.password)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization") }
+            else { r.setValue(login.user, forHTTPHeaderField: "x-auth-user"); r.setValue(KOReaderDigest.filename(login.password), forHTTPHeaderField: "x-auth-key") }
+            let (d, resp) = try await URLSession.shared.data(for: r)
+            return (d, (resp as! HTTPURLResponse).statusCode)
+        }
+        let (feed, _) = try await call("opds", basic: true)
+        XCTAssertTrue(String(decoding: feed, as: UTF8.self).contains("<title>\(BookTitle.clean(m.title))</title>"))
+        let key = BridgeKeys(libraryKey: config.libraryKey).objectName("book/\(m.id)")
+        let (epub, _) = try await call("opds/books/\(key).epub", basic: true)
+        XCTAssertEqual(epub, Fixtures.sampleEPUB(), "the EPUB as it is: its digest matches for position sync")
+
+        // The Xteink syncs a place; the iPhone takes it.
+        let map = try KOReaderPositionMap(bundle: BookBundle(url: BookBundle.url(for: m.id, in: phone.library)))
+        let xp = try XCTUnwrap(map.xpointer(chapter: 2, sentence: 1))
+        let put = try JSONSerialization.data(withJSONObject: ["document": m.koreaderDigest, "progress": xp, "percentage": 0.7, "device": "CrossPoint", "device_id": "x4"])
+        _ = try await call("kosync/syncs/progress", method: "PUT", body: put)
+        try await phone.sync.sync()
+        XCTAssertEqual(phone.progress.position(for: m.id).map { [$0.chapter, $0.sentence] }, [2, 1])
+        XCTAssertEqual(phone.progress.position(for: m.id)?.deviceID.hasPrefix("koreader:"), true)
+
+        // The iPhone reads on; the Xteink gets the iPhone's place.
+        try await Task.sleep(nanoseconds: 1_100_000_000)
+        phone.progress.record(ReadingPosition(bookID: m.id, chapter: 2, sentence: 3, mode: .listening, deviceID: "iphone-1"))
+        try await phone.sync.sync()
+        let (got, _) = try await call("kosync/syncs/progress/\(m.koreaderDigest)")
+        let pointer = try XCTUnwrap((try JSONSerialization.jsonObject(with: got) as? [String: Any])?["progress"] as? String)
+        XCTAssertEqual(map.position(for: pointer).map { [$0.chapter, $0.sentence] }, [2, 3])
+    }
+
+    func testTitlesLeaveTheSourceOut() {
+        XCTAssertEqual(BookTitle.clean("The Project Gutenberg eBook of Pride and Prejudice"), "Pride and Prejudice")
+        XCTAssertEqual(BookTitle.clean("Zodiac Academy: Ruthless Fae: An Academy Bully Romance (Supernatural Bullies and Beasts Book 2)"),
+                       "Zodiac Academy: Ruthless Fae: An Academy Bully Romance")
+        XCTAssertEqual(BookTitle.clean("The Republic - Oxford University Press"), "The Republic")
+        XCTAssertEqual(BookTitle.clean("Moby Dick | Standard Ebooks"), "Moby Dick")
+        XCTAssertEqual(BookTitle.clean("Dune: Deluxe Edition [z-lib.org]"), "Dune: Deluxe Edition")
+        XCTAssertEqual(BookTitle.clean("Stand by Me"), "Stand by Me")
+    }
+}

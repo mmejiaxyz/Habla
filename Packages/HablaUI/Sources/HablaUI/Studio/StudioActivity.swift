@@ -47,12 +47,13 @@ extension StudioStore {
         for e in activityEvents {
             let (img, accent, title) = cover(e.bookID)
             let name = e.title ?? title
-            let toXteink = e.route == "Xteink"
+            let toXteink = e.route?.hasPrefix("Xteink") == true
+            let viaCatalog = e.route == "Xteink catalog"
             switch e.state {
             case .running(let p):
                 let pct = p.map { " · \(Int(($0 * 100).rounded()))%" } ?? ""
                 entries.append(ActivityEntry(id: e.id, kind: (e.kind == .sending ? "Sending" : "Getting") + pct, title: name,
-                                             detail: toXteink ? "To your Xteink over Wi-Fi" : e.kind == .sending ? "Through the cloud to your other devices" : "Through the cloud",
+                                             detail: viaCatalog ? "Into your Xteink’s catalog in the cloud" : toXteink ? "To your Xteink over Wi-Fi" : e.kind == .sending ? "Through the cloud to your other devices" : "Through the cloud",
                                              cover: img, accentHex: accent, progress: p, tone: .running))
             case .waiting(let why):
                 entries.append(ActivityEntry(id: e.id, kind: "Waiting", title: name, detail: why, cover: img, accentHex: accent, tone: .waiting))
@@ -62,7 +63,7 @@ extension StudioStore {
             case .done:
                 let time = e.updatedAt.formatted(date: .omitted, time: .shortened)
                 entries.append(ActivityEntry(id: e.id, kind: (e.kind == .sending ? "Sent · " : "Arrived · ") + time, title: name,
-                                             detail: toXteink ? "On your Xteink" : e.kind == .sending ? "On the cloud for your other devices" : "From your other device",
+                                             detail: viaCatalog ? "In your Xteink’s catalog: download it there" : toXteink ? "On your Xteink" : e.kind == .sending ? "On the cloud for your other devices" : "From your other device",
                                              cover: img, accentHex: accent, tone: .done))
             }
         }
