@@ -1104,7 +1104,8 @@ public final class StudioStore: ObservableObject {
             xteink = .failed("This Mac isn't on Wi-Fi.")
             return
         }
-        let macURL = URL(string: "http://\(ip):\(port)")!
+        // The Mac serves its library over TLS; the Xteink accepts https (it skips the certificate check).
+        let macURL = URL(string: "\(encrypted ? "https" : "http")://\(ip):\(port)")!
         let sync = XteinkSync(device: device)
         do {
             let status = try await device.status()
